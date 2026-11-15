@@ -1,4 +1,4 @@
-// model.ts — radar-2: the token radar's model.
+// model.ts — radar-3: the token radar's model.
 //
 // One snapshot of the protocol universe in, one ranked board out. The board
 // covers every slug in the snapshot's watchlist (the floor, never a ceiling)
@@ -12,14 +12,16 @@
 //      the group's max. That gives 128 live-token comps.
 //   2. OLS log-log fit log(mcap) = a + b*log(tvl) on those 128 comps.
 //      Slope < 1: smaller protocols command higher multiples (the size curve).
-//   3. Per-category relative factor: the category's median FDV/TVL, shrunk
+//   3. Per-category relative factor: the category's median mcap/TVL, shrunk
 //      toward the global median (prior weight 4) and expressed relative to it,
 //      clamped to [0.15, 2.0]. Categories with fewer than 2 live comps get
 //      factor 1.0 (no comps -> global). Vault curators / capital allocators
 //      get a flat 0.5x: their TVL is nested inside underlying protocols, so a
-//      token would capture a fee slice, not the full TVL.
-//   4. implied = TVL x sizeCurve(TVL) x categoryFactor x growth x maturity
-//      x stageDiscount(0.6), where growth = 1 + 0.5*clamp(change_7d,-60,120)/100
+//      token would capture a fee slice, not the full TVL. The factor is
+//      applied at half strength (factor^0.5); the curator 0.5x is NOT damped.
+//   4. implied = TVL x sizeCurve(TVL) x categoryFactor^0.5 x growth x maturity
+//      x stageDiscount(0.6) x 0.10 if the row carries a baked verification
+//      concern (8 slugs in lib/verify.ts), where growth = 1 + 0.5*clamp(change_7d,-60,120)/100
 //      and maturity = 0.6 + min(age,1095)/1095*0.4 (unknown age = 365d).
 //   5. Leave-one-out backtest of the fitted model is computed at runtime and
 //      reported honestly in the model panel; the low/bull band is
@@ -40,7 +42,7 @@ import {
   type ExclusionReason,
 } from './verify.ts';
 
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 export const STAGE_DISCOUNT = 0.6;
 export const UNKNOWN_AGE_DAYS = 365;
 export const MATURITY_DAYS = 1095;
@@ -101,6 +103,9 @@ export interface RadarRow {
   watchlist: boolean;
   verified: boolean;
   multiple_used: number;
+  /** Damped category factor actually applied (0.5 for curator categories,
+   *  otherwise the raw factor ^0.5). Excludes the concern haircut. */
+  factor_used: number;
   farm_steps: string[];
   farm: {
     capital_usd: number;
@@ -122,6 +127,9 @@ export interface RadarData {
     stageDiscount: number;
     loo: { n: number; mape: number; medianAbsLogErr: number };
     comps: RadarComp[];
+    /** All 128 parent-aggregated live comps as [tvl, mcap, category] triples,
+     *  sorted by tvl ascending — the calibration-chart scatter population. */
+    fitPoints: [number, number, string][];
   };
   audit: {
     total: number;
@@ -130,6 +138,16 @@ export interface RadarData {
     watchlist: number;
     boardRows: number;
     excluded: { reason: string; count: number; examples: string[] }[];
+    /** What the 141 excluded rows would have scored, had they been admitted. */
+    counterfactual: {
+      top_name: string;
+      top_value_usd: number;
+      above_top10: number;
+      above_top1: number;
+      excluded_tvl_usd: number;
+      board_tvl_usd: number;
+      excluded_count: number;
+    };
   };
   rows: RadarRow[];
   live: {
@@ -261,7 +279,7 @@ function logLogFit(comps: AggComp[]): { a: number; b: number } {
 }
 
 /**
- * Relative category factor from a comp set: the category median FDV/TVL,
+ * Relative category factor from a comp set: the category median mcap/TVL,
  * shrunk toward the global median with prior weight 4, divided by the global
  * median, clamped to [0.15, 2.0]. Fewer than 2 live comps -> 1.0 (no comps).
  * Curator / allocator categories -> flat 0.5 (nested TVL, fee slice only).
@@ -277,6 +295,18 @@ function categoryFactor(
   const med = median(inCat.map((c) => c.mcap / c.tvl));
   const shrunk = (inCat.length * med + 4 * globalMedian) / (inCat.length + 4);
   return clamp(shrunk / globalMedian, 0.15, 2);
+}
+
+/**
+ * radar-3: the category factor at half strength in log space (raw^0.5).
+ * The curator 0.5x is NOT damped — it is a structural nesting discount
+ * (TVL counted twice), not a fitted factor — so it stays exactly 0.5.
+ * categoryMultiples keeps storing the RAW factor; damping is applied here,
+ * at each use site (score() and the LOO loop).
+ */
+function dampedFactor(rawFactor: number, category: string): number {
+  if (CURATOR_CATEGORIES.has(category)) return 0.5;
+  return Math.pow(rawFactor, 0.5);
 }
 
 function ageDays(p: SnapshotProtocol, asOfMs: number): number | null {
@@ -312,7 +342,7 @@ export function buildRadar(snapshot: Snapshot): {
     const rest = liveAgg.filter((_, j) => j !== i);
     const fit = logLogFit(rest);
     const gm = median(rest.map((c) => c.mcap / c.tvl));
-    const f = categoryFactor(held.category, rest, gm);
+    const f = dampedFactor(categoryFactor(held.category, rest, gm), held.category);
     const pred =
       held.tvl * Math.exp(fit.a) * held.tvl ** (fit.b - 1) * f * STAGE_DISCOUNT;
     looErrs.push({
@@ -338,10 +368,16 @@ export function buildRadar(snapshot: Snapshot): {
     const growth =
       1 + (0.5 * clamp(p.change_7d ?? 0, -60, 120)) / 100;
     const maturity = 0.6 + (Math.min(effAge, MATURITY_DAYS) / MATURITY_DAYS) * 0.4;
-    const factor = categoryMultiples[p.category] ?? 1;
+    const factor = dampedFactor(categoryMultiples[p.category] ?? 1, p.category);
     // TVL <= 0 would make the size curve blow up (tvl^(b-1) with b < 1);
     // such a row can never be a real launch candidate, so floor it at $1.
     if (!(p.tvl_usd > 0)) return { base: 1, factor, age };
+    // Concern haircut x0.10: a row carrying a baked verification concern
+    // (parent token already trades / stablecoin product / ...) has a base
+    // case of no new token, so the value shown is governance-option value
+    // only. Applied AFTER the stage discount, BEFORE rounding/banding; the
+    // low/bull band derives from the haircut base as usual.
+    const concernHaircut = concernFor(p.slug) !== undefined ? 0.1 : 1;
     const base = Math.max(
       1,
       Math.round(
@@ -350,7 +386,8 @@ export function buildRadar(snapshot: Snapshot): {
           factor *
           growth *
           maturity *
-          STAGE_DISCOUNT,
+          STAGE_DISCOUNT *
+          concernHaircut,
       ),
     );
     return { base, factor, age };
@@ -358,11 +395,17 @@ export function buildRadar(snapshot: Snapshot): {
 
   // --- board assembly: watchlist (always) + rankable below-floor pre-token ---
   const excludedByReason = new Map<ExclusionReason, string[]>();
-  const scored: { p: SnapshotProtocol; base: number; age: number | null }[] = [];
+  const excludedProtocols: SnapshotProtocol[] = [];
+  const scored: {
+    p: SnapshotProtocol;
+    base: number;
+    factor: number;
+    age: number | null;
+  }[] = [];
   for (const p of snapshot.protocols) {
     if (watchlist.has(p.slug)) {
-      const { base, age } = score(p);
-      scored.push({ p, base, age });
+      const { base, factor, age } = score(p);
+      scored.push({ p, base, factor, age });
       continue;
     }
     if (!isPreToken(p)) continue;
@@ -374,11 +417,12 @@ export function buildRadar(snapshot: Snapshot): {
       const list = excludedByReason.get(reason) ?? [];
       list.push(p.slug);
       excludedByReason.set(reason, list);
+      excludedProtocols.push(p);
       continue;
     }
     if (p.tvl_usd <= 0) continue;
-    const { base, age } = score(p);
-    scored.push({ p, base, age });
+    const { base, factor, age } = score(p);
+    scored.push({ p, base, factor, age });
   }
   // Deterministic order: implied desc, TVL desc, slug asc (breaks the rare tie).
   scored.sort(
@@ -388,7 +432,7 @@ export function buildRadar(snapshot: Snapshot): {
       (x.p.slug < y.p.slug ? -1 : 1),
   );
 
-  const rows: RadarRow[] = scored.map(({ p, base, age }, i) => {
+  const rows: RadarRow[] = scored.map(({ p, base, factor, age }, i) => {
     const plan = farmPlanFor({
       slug: p.slug,
       name: p.name,
@@ -456,6 +500,7 @@ export function buildRadar(snapshot: Snapshot): {
       watchlist: watchlist.has(p.slug),
       verified,
       multiple_used: base / p.tvl_usd,
+      factor_used: factor,
       farm_steps: plan.steps,
       farm: {
         capital_usd: plan.capital_usd,
@@ -483,6 +528,48 @@ export function buildRadar(snapshot: Snapshot): {
     }))
     .sort((a, b) => b.count - a.count);
 
+  // Calibration-chart population: all 128 parent-aggregated live comps as
+  // [tvl, mcap, category] triples, sorted by tvl ascending.
+  const fitPoints: [number, number, string][] = [...liveAgg]
+    .sort((a, b) => a.tvl - b.tvl || (a.symbol < b.symbol ? -1 : 1))
+    .map((c) => [c.tvl, c.mcap, c.category]);
+
+  // --- audit counterfactual: what the excluded rows would have scored ---
+  // Same score() path as board rows (growth/maturity/stage included). No
+  // concern haircut applies: none of the excluded slugs carries a baked
+  // verification concern — all 8 concern slugs are watchlist rows, which
+  // bypass exclusion entirely. Assert it loudly rather than silently
+  // understating the counterfactual if that ever stops being true.
+  const excludedConcern = excludedProtocols.filter(
+    (p) => concernFor(p.slug) !== undefined,
+  );
+  if (excludedConcern.length > 0) {
+    throw new Error(
+      `counterfactual: excluded rows carry a verification concern: ${excludedConcern
+        .map((p) => p.slug)
+        .join(', ')}`,
+    );
+  }
+  const excludedScored = excludedProtocols.map((p) => ({
+    p,
+    base: score(p).base,
+  }));
+  const excludedTop = excludedScored.reduce(
+    (best, cur) => (cur.base > best.base ? cur : best),
+    { p: excludedProtocols[0]!, base: 0 },
+  );
+  const boardTop1 = rows.length > 0 ? rows[0]!.implied_base : 0;
+  const boardTop10 = rows.length >= 10 ? rows[9]!.implied_base : 0;
+  const counterfactual = {
+    top_name: excludedTop.p.name,
+    top_value_usd: excludedTop.base,
+    above_top10: excludedScored.filter((s) => s.base > boardTop10).length,
+    above_top1: excludedScored.filter((s) => s.base > boardTop1).length,
+    excluded_tvl_usd: excludedProtocols.reduce((s, p) => s + p.tvl_usd, 0),
+    board_tvl_usd: rows.reduce((s, r) => s + r.tvl_usd, 0),
+    excluded_count: excludedProtocols.length,
+  };
+
   const largeLiquid = liveAgg
     .filter((c) => c.mcap >= 50_000_000 && c.tvl >= 100_000_000)
     .sort((a, b) => b.mcap - a.mcap);
@@ -508,14 +595,16 @@ export function buildRadar(snapshot: Snapshot): {
   const formula =
     `implied = TVL x exp(${loglog.a.toFixed(4)}) x TVL^(${(
       loglog.b - 1
-    ).toFixed(4)}) x categoryFactor x ` +
-    `(1 + 0.5 x clamp(change_7d,-60,120)/100) x (0.6 + min(age,1095)/1095 x 0.4) x 0.6; ` +
+    ).toFixed(4)}) x categoryFactor^0.5 x ` +
+    `(1 + 0.5 x clamp(change_7d,-60,120)/100) x (0.6 + min(age,1095)/1095 x 0.4) x 0.6 x 0.10 if baked verification concern; ` +
     `log(mcap) = ${loglog.a.toFixed(4)} + ${loglog.b.toFixed(
       4,
     )} x log(tvl) fitted on ${liveAgg.length} parent-aggregated live-token comps; ` +
-    `categoryFactor = shrunk category median FDV/TVL / global median ${globalMedian.toFixed(
+    `categoryFactor = shrunk category median mcap/TVL / global median ${globalMedian.toFixed(
       4,
     )}, clamped [0.15, 2.0], <2 comps -> 1.0, curators -> 0.5; ` +
+    `the category factor is applied at half strength (factor^0.5) for every non-curator category, while the curator 0.5x is a structural nesting discount and stays undamped; ` +
+    `rows carrying a baked verification concern (8 slugs: parent token already trades, stablecoin product, chain, or no launch mechanism visible) get an additional x0.10 haircut after the stage discount, so the value shown is governance-option value only; ` +
     `low/bull = base / x${band.toFixed(2)} (LOO median abs log error ${loo.medianAbsLogErr.toFixed(
       3,
     )}); stage discount 0.6.`;
@@ -531,6 +620,7 @@ export function buildRadar(snapshot: Snapshot): {
       stageDiscount: STAGE_DISCOUNT,
       loo,
       comps,
+      fitPoints,
     },
     audit: {
       total: snapshot.protocols.length,
@@ -539,6 +629,7 @@ export function buildRadar(snapshot: Snapshot): {
       watchlist: snapshot.watchlist.length,
       boardRows: rows.length,
       excluded,
+      counterfactual,
     },
     rows,
     live,

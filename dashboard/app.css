@@ -148,3 +148,13 @@ ul.risks li::marker{color:var(--red)}
   .brand h1{font-size:18px}
   .count{margin-left:0}
 }
+
+/* v2: calibration chart + verified flags */
+.chart{width:100%;height:auto;display:block}
+.chart .grid{stroke:#1a2c36;stroke-width:1}
+.chart .ax,.chart .ay{fill:#5d7a72;font:11px ui-monospace,Menlo,Consolas,monospace}
+.chart .ax{text-anchor:middle}
+.chart .ay{text-anchor:end}
+.chart .fit{stroke:#2ee6a8;stroke-width:2;fill:none}
+.flag{margin-left:6px;font-size:10.5px;padding:1px 6px;vertical-align:1px}
+.cf{margin:12px 0 0;font-size:13.5px;color:#c6d8d2;border-left:3px solid var(--amber);padding:2px 0 2px 10px}

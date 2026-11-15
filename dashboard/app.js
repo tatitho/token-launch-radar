@@ -44,6 +44,10 @@
     if (c !== 'high' && c !== 'medium') c = 'low';
     return '<span class="badge ' + c + '">' + c + '</span>';
   }
+  function flagChip(r) {
+    var f = r.verified === false;
+    return '<span class="badge ' + (f ? 'unverified' : 'verified') + ' flag">' + (f ? '&#9888; flagged' : '&#10003; verified') + '</span>';
+  }
   function catChip(cat) {
     var c = cat || 'Other';
     return '<span class="cat" style="color:' + catColor(c) + ';border-color:' + catColor(c) + '55;background:' + catColor(c) + '14">' + esc(c) + '</span>';
@@ -113,7 +117,7 @@
     for (var k = 0; k < top.length; k++) {
       var r = top[k];
       h += '<tr><td class="num">' + esc(r.rank) + '</td>' +
-        '<td class="name">' + wlMark(r) + '<a href="' + rowLink(r) + '">' + esc(r.name) + '</a></td>' +
+        '<td class="name">' + wlMark(r) + '<a href="' + rowLink(r) + '">' + esc(r.name) + '</a> ' + flagChip(r) + '</td>' +
         '<td>' + catChip(r.category) + '</td>' +
         '<td class="num">' + fmtUsd(r.tvl_usd) + '</td>' +
         '<td class="num ' + pctCls(r.change_7d) + '">' + fmtPct(r.change_7d) + '</td>' +
@@ -125,7 +129,7 @@
   }
 
   /* ---------- filters + board ---------- */
-  var state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', wl: false, sort: 'rank', dir: 1 };
+  var state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', wl: false, hideFlag: false, sort: 'rank', dir: 1 };
   var SORTS = {
     rank: function (a, b) { return (num(a.rank) || 9999) - (num(b.rank) || 9999); },
     implied: function (a, b) { return (num(b.implied_base) || 0) - (num(a.implied_base) || 0); },
@@ -146,6 +150,7 @@
     var q = state.q.trim().toLowerCase();
     var out = rows.filter(function (r) {
       if (state.wl && !r.watchlist) return false;
+      if (state.hideFlag && r.verified === false) return false;
       if (state.cat !== 'all' && r.category !== state.cat) return false;
       if (state.conf !== 'all' && (r.confidence || '').toLowerCase() !== state.conf) return false;
       if (state.chain !== 'all' && !(r.chains || []).some(function (c) { return c === state.chain; })) return false;
@@ -166,7 +171,7 @@
     for (var k = 0; k < list.length; k++) {
       var r = list[k];
       h += '<tr><td class="num">' + esc(r.rank) + '</td>' +
-        '<td class="name">' + wlMark(r) + '<a href="' + rowLink(r) + '">' + esc(r.name) + '</a>' +
+        '<td class="name">' + wlMark(r) + '<a href="' + rowLink(r) + '">' + esc(r.name) + '</a> ' + flagChip(r) +
         '<br><span class="mut" style="font-size:12px">' + esc(r.slug) + '</span></td>' +
         '<td>' + catChip(r.category) + '</td>' +
         '<td class="mut" style="font-size:12.5px">' + esc((r.chains || []).slice(0, 2).join(', ') || 'n/a') +
@@ -204,13 +209,20 @@
     document.getElementById('f-band').addEventListener('change', function (e) { state.band = e.target.value; renderBoard(); });
     document.getElementById('f-conf').addEventListener('change', function (e) { state.conf = e.target.value; renderBoard(); });
     document.getElementById('f-wl').addEventListener('change', function (e) { state.wl = e.target.checked; renderBoard(); });
+    var wl = document.getElementById('f-wl');
+    var hfLab = document.createElement('label');
+    hfLab.className = 'f-check';
+    hfLab.innerHTML = '<input id="f-hideflag" type="checkbox"> <span>Hide flagged rows</span>';
+    wl.parentNode.parentNode.insertBefore(hfLab, wl.parentNode.nextSibling);
+    document.getElementById('f-hideflag').addEventListener('change', function (e) { state.hideFlag = e.target.checked; renderBoard(); });
     document.getElementById('f-sort').addEventListener('change', function (e) { state.sort = e.target.value; renderBoard(); });
     document.getElementById('f-dir').addEventListener('click', function () { state.dir = -state.dir; renderBoard(); });
     document.getElementById('f-reset').addEventListener('click', function () {
-      state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', wl: false, sort: 'rank', dir: 1 };
+      state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', wl: false, hideFlag: false, sort: 'rank', dir: 1 };
       document.getElementById('f-q').value = ''; document.getElementById('f-cat').value = 'all';
       document.getElementById('f-chain').value = 'all'; document.getElementById('f-band').value = 'all';
       document.getElementById('f-conf').value = 'all'; document.getElementById('f-wl').checked = false;
+      document.getElementById('f-hideflag').checked = false;
       document.getElementById('f-sort').value = 'rank'; renderBoard();
     });
     var ths = document.querySelectorAll('#boardtbl th[data-sort]');
@@ -254,7 +266,7 @@
       ? '<ul class="risks">' + risks.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('') + '</ul>'
       : '<p class="mut">No specific risks recorded — the generic risks still apply: a token may never launch, and points may dilute.</p>';
     var compsHtml = comps.length
-      ? '<div class="tbl-wrap"><table class="tbl mini"><thead><tr><th>Live comparable</th><th class="r">TVL</th><th class="r">Mcap</th><th class="r">FDV/TVL</th></tr></thead><tbody>' +
+      ? '<div class="tbl-wrap"><table class="tbl mini"><thead><tr><th>Live comparable</th><th class="r">TVL</th><th class="r">Mcap</th><th class="r">mcap/TVL</th></tr></thead><tbody>' +
         comps.map(function (c) {
           return '<tr><td>' + esc(c.name) + '</td><td class="r num">' + fmtUsd(c.tvl_usd) + '</td><td class="r num">' + fmtUsd(c.mcap_usd) + '</td><td class="r num">' + fmtMult(c.multiple) + '</td></tr>';
         }).join('') + '</tbody></table></div>'
@@ -274,7 +286,7 @@
       '<div class="d-grid">' +
       '<div class="d-stat"><span>TVL</span><b>' + fmtUsd(r.tvl_usd) + '</b><small>7d ' + fmtPct(r.change_7d) + '</small></div>' +
       '<div class="d-stat"><span>Age, no token</span><b>' + fmtAge(r.age_days) + '</b><small>since first listed</small></div>' +
-      '<div class="d-stat"><span>Multiple used</span><b>' + fmtMult(r.multiple_used) + '</b><small>FDV/TVL, category-calibrated</small></div>' +
+      '<div class="d-stat"><span>Multiple used</span><b>' + fmtMult(r.multiple_used) + '</b><small>mcap/TVL, category-calibrated</small></div>' +
       '<div class="d-stat"><span>Implied FDV (base)</span><b>' + fmtUsd(r.implied_base) + '</b><small>low ' + fmtUsd(r.implied_low) + ' &middot; bull ' + fmtUsd(r.implied_bull) + '</small></div>' +
       '</div>' +
       '<div class="range"><div><span>Low</span><b>' + fmtUsd(r.implied_low) + '</b></div>' +
@@ -287,7 +299,34 @@
       '<dt>Implied airdrop slice</dt><dd class="num">' + esc(airdrop) + '</dd></dl>' +
       '<p class="mut" style="font-size:12.5px">The airdrop slice is the implied FDV times the share a community allocation usually takes (5–25%). Points outstanding are unknown, so no per-user value is claimed.</p></div>' +
       '<div class="d-sec"><h3>Why this multiple</h3>' + compsHtml +
+      (r.factor_used != null ? '<dl class="kv" style="margin:12px 0 0"><dt>Category factor (damped)</dt><dd class="num">' + fmtMult(r.factor_used) + '</dd></dl>' : '') +
       '<h3 style="margin-top:16px">Risks</h3>' + risksHtml + '</div></div></div>';
+  }
+
+  /* Calibration chart: log-log scatter of the fit comps + fit line. */
+  function calChart() {
+    var m = D.model || {}, fp = m.fitPoints, ll = m.loglog, a, b;
+    var noPts = '<p class="mut">No calibration points in data.</p>';
+    if (!fp || !fp.length || !ll || (a = num(ll.a)) === null || (b = num(ll.b)) === null) return noPts;
+    var L = 58, T = 12, w = 640 - L - 12, h = 360 - T - 34, Hb = T + h;
+    var mnx = 1 / 0, mxx = 0, mny = 1 / 0, mxy = 0, i, p, x, y;
+    for (i = 0; i < fp.length; i++) {
+      p = fp[i]; x = num(p[0]); y = num(p[1]);
+      if (x > 0 && y > 0) { if (x < mnx) mnx = x; if (x > mxx) mxx = x; if (y < mny) mny = y; if (y > mxy) mxy = y; }
+    }
+    if (!(mxx > mnx) || !(mxy > mny)) return noPts;
+    var x0 = Math.floor(Math.log10(mnx)), x1 = Math.ceil(Math.log10(mxx)), y0 = Math.floor(Math.log10(mny)), y1 = Math.ceil(Math.log10(mxy));
+    function X(v){return L+(Math.log10(v)-x0)/(x1-x0)*w;}
+    function Y(v){return T+h-(Math.log10(v)-y0)/(y1-y0)*h;}
+    var s = '<svg viewBox="0 0 640 360" class="chart">', t, py, p10;
+    for (t = x0; t <= x1; t++) { p10 = Math.pow(10, t); s += '<text x="' + X(p10) + '" y="' + (Hb + 16) + '" class="ax">' + fmtUsd(p10) + '</text>'; }
+    for (t = y0; t <= y1; t++) { p10 = Math.pow(10, t); py = Y(p10); s += '<line x1="' + L + '" y1="' + py + '" x2="' + (L + w) + '" y2="' + py + '" class="grid"/><text x="' + (L - 6) + '" y="' + (py + 4) + '" class="ay">' + fmtUsd(p10) + '</text>'; }
+    s += '<line x1="' + X(mnx) + '" y1="' + Y(Math.exp(a + b * Math.log(mnx))) + '" x2="' + X(mxx) + '" y2="' + Y(Math.exp(a + b * Math.log(mxx))) + '" class="fit"/>';
+    for (i = 0; i < fp.length; i++) {
+      p = fp[i]; x = num(p[0]); y = num(p[1]);
+      if (x > 0 && y > 0) s += '<circle cx="' + X(x) + '" cy="' + Y(y) + '" r="3" fill="' + catColor(p[2] || 'Other') + '"/>';
+    }
+    return s + '</svg><p class="mut" style="font-size:13px;margin:10px 0 0">Dots: the ' + fp.length + ' live comps, log–log, by category. Line: log(mcap) = ' + a.toFixed(4) + ' + ' + b.toFixed(4) + ' &middot; log(TVL).</p>';
   }
 
   /* ---------- model + audit panel ---------- */
@@ -296,13 +335,20 @@
     var aud = D.audit || {};
     var mults = m.categoryMultiples || {};
     var multRows = Object.keys(mults).sort().map(function (k) {
-      return '<tr><td>' + esc(k) + '</td><td class="r num">' + fmtMult(mults[k]) + '</td></tr>';
+      var v = num(mults[k]);
+      var d = v === null ? null : (k === 'Risk Curators' || k === 'Onchain Capital Allocator' ? 0.5 : Math.pow(v, 0.5));
+      return '<tr><td>' + esc(k) + '</td><td class="r num">' + fmtMult(d) + '</td></tr>';
     }).join('');
     var excl = (aud.excluded || []).map(function (e) {
       return '<li><b>' + esc(e.reason) + '</b> — ' + esc(e.count) + ' protocols' +
         (e.examples && e.examples.length ? ' <span class="mut">(e.g. ' + e.examples.map(esc).join(', ') + ')</span>' : '') + '</li>';
     }).join('');
     var loo = m.loo || {};
+    var cf = aud.counterfactual;
+    var cfHtml = '';
+    if (cf && cf.top_name && num(cf.top_value_usd) !== null && cf.above_top10 != null && cf.excluded_count != null) {
+      cfHtml = '<p class="cf">Scored naively, the ' + cf.excluded_count + ' excluded protocols would take the top of the board — ' + esc(cf.top_name) + ' would rank #1 at ' + fmtUsd(cf.top_value_usd) + '; ' + cf.above_top10 + ' of them would beat today&rsquo;s #10. They are excluded because a CEX balance, a wrapped asset or a bridge is not a token launch, however large its TVL.</p>';
+    }
     document.getElementById('model').innerHTML =
       '<div class="m-grid">' +
       '<div class="panel" style="padding:16px 18px"><div class="panel-h" style="padding:0 0 8px"><h2>How the implied value is built</h2></div>' +
@@ -316,7 +362,7 @@
       '<dt>Stage discount</dt><dd class="mono">' + (m.stageDiscount != null ? m.stageDiscount : 'n/a') + ' (pre-token execution risk)</dd>' +
       '<dt>Backtest (leave-one-out)</dt><dd class="mono">' + (loo.n != null ? loo.n + ' live-token comps &middot; MAPE ' + (loo.mape != null ? (loo.mape * 100).toFixed(1) + '%' : 'n/a') + ' &middot; median |log error| ' + (loo.medianAbsLogErr != null ? loo.medianAbsLogErr.toFixed(2) : 'n/a') : 'n/a') + '</dd>' +
       '<dt>Comparables used</dt><dd class="mono">' + ((m.comps || []).length) + ' live-token protocols</dd></dl>' +
-      '<h3 style="margin:16px 0 8px;font-size:14px;color:var(--acc)">Category multiples (FDV / TVL)</h3>' +
+      '<h3 style="margin:16px 0 8px;font-size:14px;color:var(--acc)">Category multiples (mcap / TVL, damped &gamma;=0.5)</h3>' +
       (multRows ? '<div class="tbl-wrap"><table class="tbl mini"><thead><tr><th>Category</th><th class="r">Multiple</th></tr></thead><tbody>' + multRows + '</tbody></table></div>' : '<p class="mut">No category multiples in data.</p>') +
       '</div>' +
       '<div class="panel" style="padding:16px 18px"><div class="panel-h" style="padding:0 0 8px"><h2>Audit — what was counted, what was cut</h2></div>' +
@@ -330,8 +376,9 @@
       (excl ? '<ul class="excl">' + excl + '</ul>' : '<p class="mut">No exclusions recorded.</p>') +
       '<p class="mut" style="font-size:13px;margin-top:14px">Exclusion is the credibility test: a CEX balance, a wrapped asset or a versioned ' +
       'sub-entry of a protocol whose token already trades is not a token launch, however large its TVL. ' +
-      'Every excluded protocol is counted above with its reason.</p></div>' +
-      '</div>';
+      'Every excluded protocol is counted above with its reason.</p>' + cfHtml + '</div>' +
+      '</div>' +
+      '<div class="panel" style="padding:16px 18px;margin-top:16px"><h2 style="margin:0 0 8px;font-size:15px">Calibration chart</h2>' + calChart() + '</div>';
   }
 
   /* ---------- live comps ---------- */
@@ -343,7 +390,7 @@
     if (!live.length) {
       h += '<p class="mut">No live-token comparables in data.</p></div>';
     } else {
-      h += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Protocol</th><th>Category</th><th class="r">TVL</th><th class="r">Mcap</th><th class="r">FDV/TVL</th></tr></thead><tbody>' +
+      h += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Protocol</th><th>Category</th><th class="r">TVL</th><th class="r">Mcap</th><th class="r">mcap/TVL</th></tr></thead><tbody>' +
         live.map(function (c) {
           return '<tr><td class="name">' + esc(c.name) + '</td><td>' + catChip(c.category) + '</td>' +
             '<td class="r num">' + fmtUsd(c.tvl_usd) + '</td><td class="r num">' + fmtUsd(c.mcap_usd) + '</td>' +

@@ -50,6 +50,40 @@ if (issue !== null) {
   process.exit(1);
 }
 
+// --- v2 farm-step build-time assertion (spec §4.2): every step carries a
+// cost and/or a duration token; no step exceeds 550 chars. ---
+const COST_RE = /\$|budget|gas|fee|APY/i;
+const DURATION_RE = /(\d+\s*[–-]\s*\d+|\d+)\s*(day|week|month)s?\b|weekly|daily|for the (first|full) (week|window)/i;
+let farmSteps = 0;
+let farmBoth = 0;
+for (const row of board) {
+  for (const s of row.farm_steps) {
+    farmSteps++;
+    const hasCost = COST_RE.test(s);
+    const hasDur = DURATION_RE.test(s);
+    if (!hasCost && !hasDur) {
+      process.stderr.write(`token radar: farm step lacks cost and duration: ${row.slug}: ${s}\n`);
+      process.exit(1);
+    }
+    if (s.length > 550) {
+      process.stderr.write(`token radar: farm step exceeds 550 chars (${s.length}): ${row.slug}\n`);
+      process.exit(1);
+    }
+    if (hasCost && hasDur) farmBoth++;
+  }
+}
+
+// --- METHOD.md size assertion (spec §5.2): the evidence narrative must fit
+// the dossier text budget with margin. ---
+const methodPath = join(here, 'dashboard', 'METHOD.md');
+if (existsSync(methodPath)) {
+  const methodBytes = statSync(methodPath).size;
+  if (methodBytes > 24_000) {
+    process.stderr.write(`token radar: dashboard/METHOD.md is ${methodBytes} bytes, over the 24,000 B budget\n`);
+    process.exit(1);
+  }
+}
+
 mkdirSync(out, { recursive: true });
 writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
 writeFileSync(join(out, 'data.js'), dataScript(radar));
@@ -97,7 +131,16 @@ if (shots.length < 3) {
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
 
+const dossierTextBytes = Buffer.byteLength(
+  (JSON.parse(readFileSync(join(out, 'dossier.json'), 'utf8')) as { text: string }).text,
+  'utf8',
+);
+
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored\n` +
+    `token radar: LOO n=${radar.model.loo.n} MAPE ${(radar.model.loo.mape * 100).toFixed(1)}% median|log| ${radar.model.loo.medianAbsLogErr.toFixed(3)}\n` +
+    `token radar: farm audit: ${farmSteps} steps, 100% with cost and/or duration, ${((farmBoth / farmSteps) * 100).toFixed(1)}% with both\n` +
+    `token radar: top 10: ${board.slice(0, 10).map((r) => `${r.slug} $${r.implied_value_usd}`).join(', ')}\n` +
+    `token radar: dossier text ${dossierTextBytes} bytes (cap ${TEXT_MAX_BYTES})\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
