@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Token Radar — pre-token protocols ranked by implied launch value</title>
+<meta name="description" content="Token launch radar: every pre-token protocol in the sealed DefiLlama snapshot, ranked by comps-calibrated implied launch value, with a farm plan for each.">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-in">
+    <div class="brand">
+      <span class="sweep" aria-hidden="true"></span>
+      <div>
+        <h1>TOKEN RADAR</h1>
+        <p class="sub">Pre-token DeFi, ranked by implied launch value &middot; snapshot <span id="asof">&mdash;</span></p>
+      </div>
+    </div>
+    <nav class="tabs" aria-label="Views">
+      <a href="#/board" data-view="board" class="on">Board</a>
+      <a href="#/model" data-view="model">Model &amp; audit</a>
+      <a href="#/comps" data-view="comps">Live comps</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap" id="app">
+  <noscript><div class="err"><b>JavaScript is required.</b> This radar renders from data.js in your browser; enable JavaScript to see the board.</div></noscript>
+  <div id="err" class="err" hidden></div>
+
+  <section id="view-board" class="view">
+    <div id="stats" class="stats" aria-label="Coverage summary"></div>
+
+    <div class="panel top10">
+      <div class="panel-h">
+        <h2>Top 10 &mdash; highest implied launch value</h2>
+        <span class="hint">Rank 1 is the largest implied FDV in the board. Click any row for its farm plan.</span>
+      </div>
+      <div class="tbl-wrap"><table class="tbl" id="top10tbl">
+        <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>TVL</th><th>7d</th><th>Implied FDV</th><th>Conf.</th></tr></thead>
+        <tbody id="top10body"><tr><td colspan="7" class="mut">Loading board&hellip;</td></tr></tbody>
+      </table></div>
+    </div>
+
+    <div class="panel filters" aria-label="Board filters">
+      <div class="f-row">
+        <label class="f-search"><span>Search</span><input id="f-q" type="search" placeholder="name or slug&hellip;" autocomplete="off"></label>
+        <label><span>Category</span><select id="f-cat"><option value="all">All categories</option></select></label>
+        <label><span>Chain</span><select id="f-chain"><option value="all">All chains</option></select></label>
+        <label><span>TVL band</span><select id="f-band">
+          <option value="all">Any TVL</option><option value="b1">&ge; $1B</option>
+          <option value="b2">$500M &ndash; $1B</option><option value="b3">$100M &ndash; $500M</option>
+          <option value="b4">$50M &ndash; $100M</option><option value="b5">&lt; $50M</option>
+        </select></label>
+        <label><span>Confidence</span><select id="f-conf">
+          <option value="all">Any confidence</option><option value="high">High</option>
+          <option value="medium">Medium</option><option value="low">Low</option>
+        </select></label>
+        <label class="f-check"><input id="f-wl" type="checkbox"> <span>Watchlist only</span></label>
+      </div>
+      <div class="f-row f-row2">
+        <label><span>Sort by</span><select id="f-sort">
+          <option value="rank">Rank</option><option value="implied">Implied FDV</option>
+          <option value="tvl">TVL</option><option value="age">Age</option><option value="chg">7d change</option>
+        </select></label>
+        <button id="f-dir" type="button" title="Toggle sort direction">&#8595; desc</button>
+        <button id="f-reset" type="button">Reset filters</button>
+        <span id="count" class="count" aria-live="polite"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="tbl-wrap"><table class="tbl" id="boardtbl">
+        <thead><tr>
+          <th data-sort="rank">#</th><th>Protocol</th><th>Category</th><th>Chains</th>
+          <th data-sort="tvl">TVL</th><th data-sort="chg">7d</th><th data-sort="age">Age</th>
+          <th data-sort="implied">Implied FDV</th><th>Conf.</th>
+        </tr></thead>
+        <tbody id="tbody"><tr><td colspan="9" class="mut">Loading board&hellip;</td></tr></tbody>
+      </table></div>
+      <p class="foot-note">Implied FDV is a range (low / base / bull) in the detail view. Values come from the snapshot&rsquo;s own live-token comparables &mdash; see Model &amp; audit. Rows marked <span class="wl-dot" aria-hidden="true"></span> are on the 40-protocol watchlist.</p>
+    </div>
+  </section>
+
+  <section id="view-detail" class="view" hidden>
+    <p class="back"><a href="#/board">&larr; Back to board</a></p>
+    <div id="detail"></div>
+  </section>
+
+  <section id="view-model" class="view" hidden>
+    <div id="model"></div>
+  </section>
+
+  <section id="view-comps" class="view" hidden>
+    <div id="comps"></div>
+  </section>
+</main>
+
+<footer class="wrap foot">
+  <p>Source: sealed DefiLlama snapshot (<span id="asof2">&mdash;</span>). One model drives this page and the board file &mdash; the numbers here are the numbers in board.json. This page makes no network requests; every figure is baked into data.js. Implied values are estimates from comparables, not predictions &mdash; a token may never launch.</p>
+</footer>
+
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
