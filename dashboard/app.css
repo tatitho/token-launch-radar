@@ -80,6 +80,14 @@ main{padding:18px 0 8px}
 .badge.unverified{color:var(--orange);background:rgba(255,154,92,.12)}
 .foot-note{margin:0;padding:11px 16px;color:var(--dim);font-size:12.5px;border-top:1px solid var(--line)}
 
+/* model cover panel (board) + farm verdict */
+.cover{padding:14px 16px}
+.cover h2{margin:0 0 8px;font-size:15px}
+.cover p{margin:7px 0 0;font-size:13.5px;color:#c6d8d2}
+.cover p b{color:#fff}
+.formula-line{background:var(--bg2);border:1px solid var(--line2);border-left:3px solid var(--acc);border-radius:var(--r-sm);padding:10px 12px;font-size:13px;line-height:1.7;overflow-x:auto;white-space:nowrap}
+.farmcell{white-space:nowrap}
+
 /* filters */
 .filters{padding:13px 16px}
 .f-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}

@@ -1,7 +1,4 @@
-/* Token Radar dashboard. Reads window.RADAR (written beside dashboard/ by
-   main.ts), renders the ranked board, filters, hash-routed detail views, the
-   model + audit panel and the live-token comparables. No network: every
-   figure comes from data.js, loaded by a plain script tag. */
+/* Token Radar dashboard. Reads window.RADAR from data.js; no network. */
 (function () {
   'use strict';
 
@@ -48,11 +45,35 @@
     var f = r.verified === false;
     return '<span class="badge ' + (f ? 'unverified' : 'verified') + ' flag">' + (f ? '&#9888; flagged' : '&#10003; verified') + '</span>';
   }
+  /* Farm verdict: same rule as lib/model.ts (data.js carries farm_verdict;
+     the fallback recomputes it from the row's own fields). SKIP = flagged
+     row, governance-option value only. THIN = low confidence, or a curator /
+     allocator row (fee slice, not the full TVL). FARM = the rest. */
+  function farmVerdictOf(r) {
+    if (r.farm_verdict === 'FARM' || r.farm_verdict === 'THIN' || r.farm_verdict === 'SKIP') return r.farm_verdict;
+    if (r.verified === false) return 'SKIP';
+    if ((r.confidence || '').toLowerCase() === 'low' || r.category === 'Risk Curators' || r.category === 'Onchain Capital Allocator') return 'THIN';
+    return 'FARM';
+  }
+  function farmBadge(v) {
+    var cls = v === 'FARM' ? 'high' : v === 'THIN' ? 'medium' : 'low';
+    return '<span class="badge ' + cls + '">' + v + '</span>';
+  }
+  function farmCell(r) {
+    var v = farmVerdictOf(r);
+    var f = r.farm || {};
+    var cap = f.capital_usd != null ? fmtUsd(f.capital_usd) : 'n/a';
+    var dur = f.duration || 'n/a';
+    var ar = f.airdrop_range;
+    var tip = 'Verdict ' + v + '. Capital ' + cap + ', hold ' + dur +
+      (ar ? '. Expected airdrop slice ' + fmtUsd(ar[0]) + '–' + fmtUsd(ar[1]) + ' (5–25% of implied FDV; points outstanding unknown, so no per-user value is promised).' : '');
+    return '<td class="farmcell" title="' + esc(tip) + '">' + farmBadge(v) +
+      '<br><span class="num" style="font-size:12px">' + cap + ' &middot; ' + esc(dur) + '</span></td>';
+  }
   function catChip(cat) {
     var c = cat || 'Other';
     return '<span class="cat" style="color:' + catColor(c) + ';border-color:' + catColor(c) + '55;background:' + catColor(c) + '14">' + esc(c) + '</span>';
   }
-  /* Stable category colours: fixed map for the big categories, hash fallback. */
   var CATC = {
     'Lending': '#57c8e8', 'Dexs': '#2ee6a8', 'Liquid Staking': '#b48cf2',
     'Yield': '#f2b544', 'Yield Aggregator': '#f2b544', 'RWA': '#ff9a5c',
@@ -75,9 +96,9 @@
       'from <span class="mono">data.js</span> beside the dashboard folder. If you opened index.html ' +
       'directly, serve the output folder instead so the data file loads.';
     var tb = document.getElementById('tbody');
-    if (tb) tb.innerHTML = '<tr><td colspan="9" class="mut">No data — data.js did not load.</td></tr>';
+    if (tb) tb.innerHTML = '<tr><td colspan="10" class="mut">No data — data.js did not load.</td></tr>';
     var t10 = document.getElementById('top10body');
-    if (t10) t10.innerHTML = '<tr><td colspan="7" class="mut">No data — data.js did not load.</td></tr>';
+    if (t10) t10.innerHTML = '<tr><td colspan="8" class="mut">No data — data.js did not load.</td></tr>';
     return;
   }
 
@@ -86,12 +107,10 @@
   for (i = 0; i < rows.length; i++) { var b = num(rows[i].implied_base); if (b !== null && b > maxBase) maxBase = b; }
   if (!maxBase) maxBase = 1;
 
-  /* ---------- header dates ---------- */
   var asof = esc(D.snapshotAsOf || D.generated || '');
   var a1 = document.getElementById('asof'); if (a1) a1.textContent = asof || 'n/a';
   var a2 = document.getElementById('asof2'); if (a2) a2.textContent = asof || 'n/a';
 
-  /* ---------- stats strip ---------- */
   function renderStats() {
     var wl = 0, tvl = 0;
     for (var k = 0; k < rows.length; k++) {
@@ -110,7 +129,6 @@
     }
   }
 
-  /* ---------- top 10 ---------- */
   function renderTop10() {
     var top = rows.slice().sort(function (x, y) { return (num(x.rank) || 9999) - (num(y.rank) || 9999); }).slice(0, 10);
     var h = '';
@@ -123,19 +141,20 @@
         '<td class="num ' + pctCls(r.change_7d) + '">' + fmtPct(r.change_7d) + '</td>' +
         '<td title="Low ' + fmtUsd(r.implied_low) + ' – bull ' + fmtUsd(r.implied_bull) + '"><span class="num"><b>' + fmtUsd(r.implied_base) + '</b></span>' +
         '<span class="bar"><i style="width:' + Math.max(2, Math.round(100 * (num(r.implied_base) || 0) / maxBase)) + '%"></i></span></td>' +
-        '<td>' + confBadge(r.confidence) + '</td></tr>';
+        '<td>' + confBadge(r.confidence) + '</td>' + farmCell(r) + '</tr>';
     }
     document.getElementById('top10body').innerHTML = h;
   }
 
-  /* ---------- filters + board ---------- */
-  var state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', wl: false, hideFlag: false, sort: 'rank', dir: 1 };
+  var state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', farm: 'all', wl: false, hideFlag: false, sort: 'rank', dir: 1 };
+  var FARM_ORDER = { FARM: 0, THIN: 1, SKIP: 2 };
   var SORTS = {
     rank: function (a, b) { return (num(a.rank) || 9999) - (num(b.rank) || 9999); },
     implied: function (a, b) { return (num(b.implied_base) || 0) - (num(a.implied_base) || 0); },
     tvl: function (a, b) { return (num(b.tvl_usd) || 0) - (num(a.tvl_usd) || 0); },
     age: function (a, b) { var x = num(a.age_days), y = num(b.age_days); if (x === null && y === null) return 0; if (x === null) return 1; if (y === null) return -1; return y - x; },
-    chg: function (a, b) { var x = num(a.change_7d), y = num(b.change_7d); if (x === null && y === null) return 0; if (x === null) return 1; if (y === null) return -1; return y - x; }
+    chg: function (a, b) { var x = num(a.change_7d), y = num(b.change_7d); if (x === null && y === null) return 0; if (x === null) return 1; if (y === null) return -1; return y - x; },
+    farm: function (a, b) { return (FARM_ORDER[farmVerdictOf(a)] - FARM_ORDER[farmVerdictOf(b)]) || ((num(a.rank) || 9999) - (num(b.rank) || 9999)); }
   };
   function inBand(r) {
     var t = num(r.tvl_usd); if (t === null) return state.band === 'all';
@@ -153,6 +172,7 @@
       if (state.hideFlag && r.verified === false) return false;
       if (state.cat !== 'all' && r.category !== state.cat) return false;
       if (state.conf !== 'all' && (r.confidence || '').toLowerCase() !== state.conf) return false;
+      if (state.farm !== 'all' && farmVerdictOf(r) !== state.farm) return false;
       if (state.chain !== 'all' && !(r.chains || []).some(function (c) { return c === state.chain; })) return false;
       if (!inBand(r)) return false;
       if (q && (r.name || '').toLowerCase().indexOf(q) < 0 && (r.slug || '').toLowerCase().indexOf(q) < 0) return false;
@@ -166,7 +186,7 @@
     var list = filtered();
     var h = '';
     if (!list.length) {
-      h = '<tr><td colspan="9" class="mut">No protocols match these filters. Loosen the search or reset the filters.</td></tr>';
+      h = '<tr><td colspan="10" class="mut">No protocols match these filters. Loosen the search or reset the filters.</td></tr>';
     }
     for (var k = 0; k < list.length; k++) {
       var r = list[k];
@@ -181,7 +201,7 @@
         '<td class="num">' + fmtAge(r.age_days) + '</td>' +
         '<td><span class="num"><b>' + fmtUsd(r.implied_base) + '</b></span> <span class="mut num" style="font-size:12px">' + fmtUsd(r.implied_low) + ' – ' + fmtUsd(r.implied_bull) + '</span>' +
         '<span class="bar"><i style="width:' + Math.max(2, Math.round(100 * (num(r.implied_base) || 0) / maxBase)) + '%"></i></span></td>' +
-        '<td>' + confBadge(r.confidence) + '</td></tr>';
+        '<td>' + confBadge(r.confidence) + '</td>' + farmCell(r) + '</tr>';
     }
     document.getElementById('tbody').innerHTML = h;
     document.getElementById('count').innerHTML = 'Showing <b>' + list.length + '</b> of <b>' + rows.length + '</b> protocols';
@@ -208,6 +228,7 @@
     document.getElementById('f-chain').addEventListener('change', function (e) { state.chain = e.target.value; renderBoard(); });
     document.getElementById('f-band').addEventListener('change', function (e) { state.band = e.target.value; renderBoard(); });
     document.getElementById('f-conf').addEventListener('change', function (e) { state.conf = e.target.value; renderBoard(); });
+    document.getElementById('f-farm').addEventListener('change', function (e) { state.farm = e.target.value; renderBoard(); });
     document.getElementById('f-wl').addEventListener('change', function (e) { state.wl = e.target.checked; renderBoard(); });
     var wl = document.getElementById('f-wl');
     var hfLab = document.createElement('label');
@@ -218,10 +239,10 @@
     document.getElementById('f-sort').addEventListener('change', function (e) { state.sort = e.target.value; renderBoard(); });
     document.getElementById('f-dir').addEventListener('click', function () { state.dir = -state.dir; renderBoard(); });
     document.getElementById('f-reset').addEventListener('click', function () {
-      state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', wl: false, hideFlag: false, sort: 'rank', dir: 1 };
+      state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', farm: 'all', wl: false, hideFlag: false, sort: 'rank', dir: 1 };
       document.getElementById('f-q').value = ''; document.getElementById('f-cat').value = 'all';
       document.getElementById('f-chain').value = 'all'; document.getElementById('f-band').value = 'all';
-      document.getElementById('f-conf').value = 'all'; document.getElementById('f-wl').checked = false;
+      document.getElementById('f-conf').value = 'all'; document.getElementById('f-farm').value = 'all'; document.getElementById('f-wl').checked = false;
       document.getElementById('f-hideflag').checked = false;
       document.getElementById('f-sort').value = 'rank'; renderBoard();
     });
@@ -240,7 +261,6 @@
     }
   })();
 
-  /* ---------- detail view ---------- */
   function findRow(slug) {
     for (var k = 0; k < rows.length; k++) if (rows[k].slug === slug) return rows[k];
     return null;
@@ -280,7 +300,7 @@
       '<div class="tagrow">' + catChip(r.category) +
       (r.watchlist ? '<span class="badge high">Watchlist</span>' : '') +
       (r.verified ? '<span class="badge verified">Token status verified</span>' : '<span class="badge unverified">Token status inferred</span>') +
-      confBadge(r.confidence) +
+      confBadge(r.confidence) + farmBadge(farmVerdictOf(r)) +
       (r.chains || []).map(function (c) { return '<span class="tag">' + esc(c) + '</span>'; }).join('') +
       '</div></div></div>' +
       '<div class="d-grid">' +
@@ -303,7 +323,6 @@
       '<h3 style="margin-top:16px">Risks</h3>' + risksHtml + '</div></div></div>';
   }
 
-  /* Calibration chart: log-log scatter of the fit comps + fit line. */
   function calChart() {
     var m = D.model || {}, fp = m.fitPoints, ll = m.loglog, a, b;
     var noPts = '<p class="mut">No calibration points in data.</p>';
@@ -329,7 +348,6 @@
     return s + '</svg><p class="mut" style="font-size:13px;margin:10px 0 0">Dots: the ' + fp.length + ' live comps, log–log, by category. Line: log(mcap) = ' + a.toFixed(4) + ' + ' + b.toFixed(4) + ' &middot; log(TVL).</p>';
   }
 
-  /* ---------- model + audit panel ---------- */
   function renderModel() {
     var m = D.model || {};
     var aud = D.audit || {};
@@ -381,7 +399,6 @@
       '<div class="panel" style="padding:16px 18px;margin-top:16px"><h2 style="margin:0 0 8px;font-size:15px">Calibration chart</h2>' + calChart() + '</div>';
   }
 
-  /* ---------- live comps ---------- */
   function renderComps() {
     var live = (D.live || []).slice().sort(function (a, b) { return (num(b.mcap_usd) || 0) - (num(a.mcap_usd) || 0); });
     var h = '<div class="panel" style="padding:16px 18px"><div class="panel-h" style="padding:0 0 8px"><h2>Live-token comparables</h2><span class="hint">' + live.length + ' protocols with a trading token, from the same snapshot</span></div>' +
@@ -400,7 +417,6 @@
     document.getElementById('comps').innerHTML = h;
   }
 
-  /* ---------- router ---------- */
   var views = ['board', 'detail', 'model', 'comps'];
   function route() {
     var hash = (window.location.hash || '').replace(/^#\/?/, '');

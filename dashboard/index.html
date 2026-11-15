@@ -33,14 +33,21 @@
   <section id="view-board" class="view">
     <div id="stats" class="stats" aria-label="Coverage summary"></div>
 
+    <div class="panel cover" aria-label="How this board is priced">
+      <h2>How this board is priced</h2>
+      <p class="formula-line mono">implied = TVL &times; exp(6.5244) &times; TVL<sup>0.5444</sup> &times; categoryFactor<sup>0.5</sup> &times; growth &times; maturity &times; 0.6 <span class="mut">(&times; 0.10 only for the 8 flagged rows)</span></p>
+      <p>One model prices this page and board.json: the numbers here are the numbers in the board file. The curve is fitted on the snapshot&rsquo;s own 128 live-token comps &mdash; log(mcap) = 6.5244 + 0.5444 &times; log(TVL) &mdash; and the calibration scatter of all 128 comps is on the Model &amp; audit tab.</p>
+      <p>Backtest (leave-one-out, n = 128 live comps): median |log error| <b>1.242</b> &mdash; a typical error of 3.46&times;; 25.8% of comps predicted within 2&times; MAPE 652.7%, dominated by near-dead tokens (on comps with mcap &ge; $1M: MAPE 85.8%, median |log error| 1.043). The order is the signal; the exact dollar figures carry that error bar.</p>
+    </div>
+
     <div class="panel top10">
       <div class="panel-h">
         <h2>Top 10 &mdash; highest implied launch value</h2>
         <span class="hint">Rank 1 is the largest implied FDV in the board. Click any row for its farm plan.</span>
       </div>
       <div class="tbl-wrap"><table class="tbl" id="top10tbl">
-        <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>TVL</th><th>7d</th><th>Implied FDV</th><th>Conf.</th></tr></thead>
-        <tbody id="top10body"><tr><td colspan="7" class="mut">Loading board&hellip;</td></tr></tbody>
+        <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>TVL</th><th>7d</th><th>Implied FDV</th><th>Conf.</th><th>Farm</th></tr></thead>
+        <tbody id="top10body"><tr><td colspan="8" class="mut">Loading board&hellip;</td></tr></tbody>
       </table></div>
     </div>
 
@@ -58,12 +65,17 @@
           <option value="all">Any confidence</option><option value="high">High</option>
           <option value="medium">Medium</option><option value="low">Low</option>
         </select></label>
+        <label><span>Farm verdict</span><select id="f-farm">
+          <option value="all">Any verdict</option><option value="FARM">FARM</option>
+          <option value="THIN">THIN</option><option value="SKIP">SKIP</option>
+        </select></label>
         <label class="f-check"><input id="f-wl" type="checkbox"> <span>Watchlist only</span></label>
       </div>
       <div class="f-row f-row2">
         <label><span>Sort by</span><select id="f-sort">
           <option value="rank">Rank</option><option value="implied">Implied FDV</option>
           <option value="tvl">TVL</option><option value="age">Age</option><option value="chg">7d change</option>
+          <option value="farm">Farm verdict</option>
         </select></label>
         <button id="f-dir" type="button" title="Toggle sort direction">&#8595; desc</button>
         <button id="f-reset" type="button">Reset filters</button>
@@ -76,11 +88,11 @@
         <thead><tr>
           <th data-sort="rank">#</th><th>Protocol</th><th>Category</th><th>Chains</th>
           <th data-sort="tvl">TVL</th><th data-sort="chg">7d</th><th data-sort="age">Age</th>
-          <th data-sort="implied">Implied FDV</th><th>Conf.</th>
+          <th data-sort="implied">Implied FDV</th><th>Conf.</th><th data-sort="farm">Farm</th>
         </tr></thead>
-        <tbody id="tbody"><tr><td colspan="9" class="mut">Loading board&hellip;</td></tr></tbody>
+        <tbody id="tbody"><tr><td colspan="10" class="mut">Loading board&hellip;</td></tr></tbody>
       </table></div>
-      <p class="foot-note">Implied FDV is a range (low / base / bull) in the detail view. Values come from the snapshot&rsquo;s own live-token comparables &mdash; see Model &amp; audit. Rows marked <span class="wl-dot" aria-hidden="true"></span> are on the 40-protocol watchlist.</p>
+      <p class="foot-note">Implied FDV is a range (low / base / bull) in the detail view. Values come from the snapshot&rsquo;s own live-token comparables &mdash; see Model &amp; audit. Rows marked <span class="wl-dot" aria-hidden="true"></span> are on the 40-protocol watchlist. Farm verdict: FARM = verified launch case worth farming; THIN = low confidence or curator fee-slice only; SKIP = flagged row whose value is governance-option only. The verdict never promises a per-user payout &mdash; the farm plan shows the capital, duration and airdrop slice it is based on.</p>
     </div>
   </section>
 
