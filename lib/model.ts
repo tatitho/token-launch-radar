@@ -113,6 +113,17 @@ export interface RadarRow {
     points: 'known' | 'none' | 'inferred';
     airdrop_range: [number, number];
   };
+  /**
+   * Farm verdict, derived from fields the model already computes — no new
+   * per-user profit is invented (points outstanding are unknown, so no
+   * per-user dollar value can be computed honestly; see lib/farm.ts):
+   * SKIP when the row carries a baked verification concern (its value is
+   * governance-option value only after the 0.10x haircut, so a fresh-launch
+   * farm is not the base case); THIN when confidence is low (the multiple
+   * is a guess) or the row is a curator/allocator (0.5x structural
+   * discount — a fee slice, not the full TVL); FARM otherwise.
+   */
+  farm_verdict: 'FARM' | 'THIN' | 'SKIP';
   risks: string[];
 }
 
@@ -484,6 +495,11 @@ export function buildRadar(snapshot: Snapshot): {
     if (CURATOR_CATEGORIES.has(p.category) && confidence === 'high') {
       confidence = 'medium';
     }
+    const farm_verdict: 'FARM' | 'THIN' | 'SKIP' = !verified
+      ? 'SKIP'
+      : confidence === 'low' || CURATOR_CATEGORIES.has(p.category)
+        ? 'THIN'
+        : 'FARM';
     return {
       slug: p.slug,
       name: p.name,
@@ -508,6 +524,7 @@ export function buildRadar(snapshot: Snapshot): {
         points: plan.points,
         airdrop_range: [plan.airdrop_low, plan.airdrop_high],
       },
+      farm_verdict,
       risks,
     };
   });
