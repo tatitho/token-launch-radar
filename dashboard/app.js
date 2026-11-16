@@ -1,10 +1,8 @@
 /* Token Radar dashboard. Reads window.RADAR from data.js; no network. */
 (function () {
   'use strict';
-
   var D = window.RADAR;
   var errBox = document.getElementById('err');
-
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -18,6 +16,14 @@
     if (a >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
     if (a >= 1e3) return '$' + Math.round(n / 1e3) + 'K';
     return '$' + Math.round(n);
+  }
+  function fmtFull(n) {
+    n = num(n); if (n === null) return 'n/a';
+    return (n < 0 ? '-$' : '$') + Math.abs(Math.round(n)).toLocaleString('en-US');
+  }
+  function fmtNetUser(n) {
+    n = num(n); if (n === null) return 'n/a';
+    return (n < 0 ? '-$' : '$') + Math.abs(n).toFixed(2);
   }
   function fmtPct(n) {
     n = num(n); if (n === null) return 'n/a';
@@ -45,10 +51,8 @@
     var f = r.verified === false;
     return '<span class="badge ' + (f ? 'unverified' : 'verified') + ' flag">' + (f ? '&#9888; flagged' : '&#10003; verified') + '</span>';
   }
-  /* Farm verdict: same rule as lib/model.ts (data.js carries farm_verdict;
-     the fallback recomputes it from the row's own fields). SKIP = flagged
-     row, governance-option value only. THIN = low confidence, or a curator /
-     allocator row (fee slice, not the full TVL). FARM = the rest. */
+  /* Farm verdict: same rule as lib/model.ts. SKIP = flagged row; THIN = low
+     confidence or a curator row (fee slice); FARM = the rest. */
   function farmVerdictOf(r) {
     if (r.farm_verdict === 'FARM' || r.farm_verdict === 'THIN' || r.farm_verdict === 'SKIP') return r.farm_verdict;
     if (r.verified === false) return 'SKIP';
@@ -64,11 +68,14 @@
     var f = r.farm || {};
     var cap = f.capital_usd != null ? fmtUsd(f.capital_usd) : 'n/a';
     var dur = f.duration || 'n/a';
+    var net = f.pool_net_low_usd != null ? fmtUsd(f.pool_net_low_usd) : null;
     var ar = f.airdrop_range;
     var tip = 'Verdict ' + v + '. Capital ' + cap + ', hold ' + dur +
-      (ar ? '. Expected airdrop slice ' + fmtUsd(ar[0]) + '–' + fmtUsd(ar[1]) + ' (5–25% of implied FDV; points outstanding unknown, so no per-user value is promised).' : '');
+      (net ? '. Netted at the low end: ' + net + ' total pool slice after $25 gas (5% of the low-end value, not a per-user payout).' : '') +
+      (ar ? ' Expected airdrop slice ' + fmtUsd(ar[0]) + '–' + fmtUsd(ar[1]) + ' (5–25% of implied value; points outstanding unknown, so no per-user value is promised).' : '');
     return '<td class="farmcell" title="' + esc(tip) + '">' + farmBadge(v) +
-      '<br><span class="num" style="font-size:12px">' + cap + ' &middot; ' + esc(dur) + '</span></td>';
+      '<br><span class="num" style="font-size:12px">' + cap + ' &middot; ' + esc(dur) + '</span>' +
+      (net ? '<br><span class="num" style="font-size:12px;color:var(--acc)">net ' + net + '</span>' : '') + '</td>';
   }
   function catChip(cat) {
     var c = cat || 'Other';
@@ -89,7 +96,6 @@
   }
   function rowLink(r) { return '#/protocol/' + encodeURIComponent(r.slug); }
   function wlMark(r) { return r.watchlist ? '<span class="wl-dot" title="Watchlist"></span>' : ''; }
-
   if (!D || !Array.isArray(D.rows) || !D.rows.length) {
     errBox.hidden = false;
     errBox.innerHTML = '<b>No radar data found.</b> This page reads <span class="mono">window.RADAR</span> ' +
@@ -101,16 +107,13 @@
     if (t10) t10.innerHTML = '<tr><td colspan="8" class="mut">No data — data.js did not load.</td></tr>';
     return;
   }
-
   var rows = D.rows.slice();
   var maxBase = 0, i;
   for (i = 0; i < rows.length; i++) { var b = num(rows[i].implied_base); if (b !== null && b > maxBase) maxBase = b; }
   if (!maxBase) maxBase = 1;
-
   var asof = esc(D.snapshotAsOf || D.generated || '');
   var a1 = document.getElementById('asof'); if (a1) a1.textContent = asof || 'n/a';
   var a2 = document.getElementById('asof2'); if (a2) a2.textContent = asof || 'n/a';
-
   function renderStats() {
     var wl = 0, tvl = 0;
     for (var k = 0; k < rows.length; k++) {
@@ -123,12 +126,11 @@
       stat(rows.length, 'protocols ranked', 'pre-token, by implied launch value') +
       stat(wl + ' / ' + (aud.watchlist || 40), 'watchlist covered', 'every watchlist protocol is on the board') +
       stat(fmtUsd(tvl), 'board TVL', 'combined TVL of ranked protocols') +
-      stat(fmtUsd(top ? top.implied_base : null), 'top implied FDV', esc(top ? top.name : ''));
+      stat(fmtUsd(top ? top.implied_base : null), 'top implied value', esc(top ? top.name : ''));
     function stat(big, label, sub) {
       return '<div class="stat"><b>' + big + '</b><span>' + esc(label) + '</span><em>' + esc(sub) + '</em></div>';
     }
   }
-
   function renderTop10() {
     var top = rows.slice().sort(function (x, y) { return (num(x.rank) || 9999) - (num(y.rank) || 9999); }).slice(0, 10);
     var h = '';
@@ -145,7 +147,6 @@
     }
     document.getElementById('top10body').innerHTML = h;
   }
-
   var state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', farm: 'all', wl: false, hideFlag: false, sort: 'rank', dir: 1 };
   var FARM_ORDER = { FARM: 0, THIN: 1, SKIP: 2 };
   var SORTS = {
@@ -260,7 +261,6 @@
       });
     }
   })();
-
   function findRow(slug) {
     for (var k = 0; k < rows.length; k++) if (rows[k].slug === slug) return rows[k];
     return null;
@@ -291,7 +291,8 @@
           return '<tr><td>' + esc(c.name) + '</td><td class="r num">' + fmtUsd(c.tvl_usd) + '</td><td class="r num">' + fmtUsd(c.mcap_usd) + '</td><td class="r num">' + fmtMult(c.multiple) + '</td></tr>';
         }).join('') + '</tbody></table></div>'
       : '<p class="mut">No live-token comparable in this category was in the snapshot.</p>';
-    var airdrop = farm.airdrop_range || 'n/a';
+    var airdrop = farm.airdrop_range;
+    var airdropTxt = (airdrop && airdrop.length === 2) ? fmtUsd(airdrop[0]) + ' – ' + fmtUsd(airdrop[1]) : 'n/a';
     var pts = farm.points || 'unknown';
     box.innerHTML =
       '<div class="panel" style="padding:18px 20px"><div class="d-head"><div>' +
@@ -305,9 +306,9 @@
       '</div></div></div>' +
       '<div class="d-grid">' +
       '<div class="d-stat"><span>TVL</span><b>' + fmtUsd(r.tvl_usd) + '</b><small>7d ' + fmtPct(r.change_7d) + '</small></div>' +
-      '<div class="d-stat"><span>Age, no token</span><b>' + fmtAge(r.age_days) + '</b><small>since first listed</small></div>' +
+      '<div class="d-stat"><span>Age, records no token</span><b>' + fmtAge(r.age_days) + '</b><small>since first listed</small></div>' +
       '<div class="d-stat"><span>Multiple used</span><b>' + fmtMult(r.multiple_used) + '</b><small>mcap/TVL, category-calibrated</small></div>' +
-      '<div class="d-stat"><span>Implied FDV (base)</span><b>' + fmtUsd(r.implied_base) + '</b><small>low ' + fmtUsd(r.implied_low) + ' &middot; bull ' + fmtUsd(r.implied_bull) + '</small></div>' +
+      '<div class="d-stat"><span>Implied value (base)</span><b>' + fmtUsd(r.implied_base) + '</b><small>low ' + fmtUsd(r.implied_low) + ' &middot; bull ' + fmtUsd(r.implied_bull) + '</small></div>' +
       '</div>' +
       '<div class="range"><div><span>Low</span><b>' + fmtUsd(r.implied_low) + '</b></div>' +
       '<div class="mid"><span>Base</span><b>' + fmtUsd(r.implied_base) + '</b></div>' +
@@ -316,13 +317,17 @@
       '<dl class="kv"><dt>Capital</dt><dd class="num">' + (farm.capital_usd != null ? fmtUsd(farm.capital_usd) : 'n/a') + '</dd>' +
       '<dt>Duration</dt><dd>' + esc(farm.duration || 'n/a') + '</dd>' +
       '<dt>Points program</dt><dd>' + esc(pts) + '</dd>' +
-      '<dt>Implied airdrop slice</dt><dd class="num">' + esc(airdrop) + '</dd></dl>' +
-      '<p class="mut" style="font-size:12.5px">The airdrop slice is the implied FDV times the share a community allocation usually takes (5–25%). Points outstanding are unknown, so no per-user value is claimed.</p></div>' +
+      '<dt>Implied airdrop slice</dt><dd class="num">' + airdropTxt + '</dd></dl>' +
+      '<p class="mut" style="font-size:12.5px">The airdrop slice is the implied value times the share a community allocation usually takes (5–25%). Points outstanding are unknown, so no per-user value is claimed.</p>' +
+      '<h3 style="margin-top:16px">Netted value</h3>' +
+      '<dl class="kv"><dt>Pool net (low end)</dt><dd class="num">' + fmtFull(farm.pool_net_low_usd) + '</dd>' +
+      '<dt>Net per user (low end)</dt><dd class="num">' + fmtNetUser(farm.net_per_user_low_usd) + '</dd>' +
+      '<dt>Break-even capital</dt><dd class="num">' + fmtFull(farm.breakeven_capital_usd) + '</dd></dl>' +
+      '<p class="mut" style="font-size:12.5px">Netted at the band&rsquo;s low end: 5% of the low-end value, minus $25 of gas. Pool net is the total community slice, not a per-user payout; the per-user net assumes a pro-rata share (capital / TVL) and is negative at plan capital on every row.</p></div>' +
       '<div class="d-sec"><h3>Why this multiple</h3>' + compsHtml +
       (r.factor_used != null ? '<dl class="kv" style="margin:12px 0 0"><dt>Category factor (damped)</dt><dd class="num">' + fmtMult(r.factor_used) + '</dd></dl>' : '') +
       '<h3 style="margin-top:16px">Risks</h3>' + risksHtml + '</div></div></div>';
   }
-
   function calChart() {
     var m = D.model || {}, fp = m.fitPoints, ll = m.loglog, a, b;
     var noPts = '<p class="mut">No calibration points in data.</p>';
@@ -347,7 +352,6 @@
     }
     return s + '</svg><p class="mut" style="font-size:13px;margin:10px 0 0">Dots: the ' + fp.length + ' live comps, log–log, by category. Line: log(mcap) = ' + a.toFixed(4) + ' + ' + b.toFixed(4) + ' &middot; log(TVL).</p>';
   }
-
   function renderModel() {
     var m = D.model || {};
     var aud = D.audit || {};
@@ -361,7 +365,13 @@
       return '<li><b>' + esc(e.reason) + '</b> — ' + esc(e.count) + ' protocols' +
         (e.examples && e.examples.length ? ' <span class="mut">(e.g. ' + e.examples.map(esc).join(', ') + ')</span>' : '') + '</li>';
     }).join('');
-    var loo = m.loo || {};
+    function looStr(l, label) {
+      if (!l || l.n == null) return '';
+      return l.n + ' ' + label + ' &middot; MAPE ' + (l.mape * 100).toFixed(1) + '% &middot; median |log error| ' + l.medianAbsLogErr.toFixed(3) + ' &middot; ' + (l.within2x * 100).toFixed(1) + '% within 2x';
+    }
+    var looTxt = looStr(m.loo, 'comps (all)') + '; ' + looStr(m.looCal, 'DeFi comps (calibration set)');
+    var topRow = rows[0] || {};
+    var boardTxt = 'board.json: ' + rows.length + ' rows, top ' + fmtUsd(topRow.implied_base) + ', rank 1 ' + (topRow.name || '') + ' &mdash; same numbers as this page (one run, one model)';
     var cf = aud.counterfactual;
     var cfHtml = '';
     if (cf && cf.top_name && num(cf.top_value_usd) !== null && cf.above_top10 != null && cf.excluded_count != null) {
@@ -370,7 +380,7 @@
     document.getElementById('model').innerHTML =
       '<div class="m-grid">' +
       '<div class="panel" style="padding:16px 18px"><div class="panel-h" style="padding:0 0 8px"><h2>How the implied value is built</h2></div>' +
-      '<div class="formula">' + esc(m.formula || 'implied FDV = TVL x category multiple x stage discount') + '</div>' +
+      '<div class="formula">' + esc(m.formula || 'implied value = TVL x category multiple x stage discount') + '</div>' +
       '<p class="mut" style="font-size:13.5px;margin:12px 0 0">The multiple is <b style="color:var(--ink)">not a flat guess</b>: it is fitted from the ' +
       'snapshot&rsquo;s own live-token protocols — a log-log size curve (smaller protocols command higher ' +
       'multiples) times a category multiplier. One model drives this page and board.json, so the numbers agree.</p>' +
@@ -378,7 +388,8 @@
       '<dt>Model</dt><dd class="mono">' + esc(m.name || 'n/a') + '</dd>' +
       '<dt>Log-log fit</dt><dd class="mono">log(mcap) = ' + (m.loglog ? m.loglog.a + ' + ' + m.loglog.b + ' &middot; log(TVL)' : 'n/a') + '</dd>' +
       '<dt>Stage discount</dt><dd class="mono">' + (m.stageDiscount != null ? m.stageDiscount : 'n/a') + ' (pre-token execution risk)</dd>' +
-      '<dt>Backtest (leave-one-out)</dt><dd class="mono">' + (loo.n != null ? loo.n + ' live-token comps &middot; MAPE ' + (loo.mape != null ? (loo.mape * 100).toFixed(1) + '%' : 'n/a') + ' &middot; median |log error| ' + (loo.medianAbsLogErr != null ? loo.medianAbsLogErr.toFixed(2) : 'n/a') : 'n/a') + '</dd>' +
+      '<dt>Backtest (leave-one-out)</dt><dd class="mono">' + looTxt + '</dd>' +
+      '<dt>Board file</dt><dd class="mono">' + boardTxt + '</dd>' +
       '<dt>Comparables used</dt><dd class="mono">' + ((m.comps || []).length) + ' live-token protocols</dd></dl>' +
       '<h3 style="margin:16px 0 8px;font-size:14px;color:var(--acc)">Category multiples (mcap / TVL, damped &gamma;=0.5)</h3>' +
       (multRows ? '<div class="tbl-wrap"><table class="tbl mini"><thead><tr><th>Category</th><th class="r">Multiple</th></tr></thead><tbody>' + multRows + '</tbody></table></div>' : '<p class="mut">No category multiples in data.</p>') +
@@ -387,7 +398,7 @@
       '<dl class="kv">' +
       '<dt>Snapshot protocols</dt><dd class="num">' + esc(aud.total != null ? aud.total : 'n/a') + '</dd>' +
       '<dt>Pre-token</dt><dd class="num">' + esc(aud.preToken != null ? aud.preToken : 'n/a') + '</dd>' +
-      '<dt>Already have a token</dt><dd class="num">' + esc(aud.withToken != null ? aud.withToken : 'n/a') + '</dd>' +
+      '<dt>Records a token</dt><dd class="num">' + esc(aud.withToken != null ? aud.withToken : 'n/a') + '</dd>' +
       '<dt>Watchlist</dt><dd class="num">' + esc(aud.watchlist != null ? aud.watchlist : 'n/a') + '</dd>' +
       '<dt>Board rows</dt><dd class="num">' + esc(aud.boardRows != null ? aud.boardRows : rows.length) + '</dd></dl>' +
       '<h3 style="margin:16px 0 8px;font-size:14px;color:var(--acc)">Excluded — and why</h3>' +
@@ -398,7 +409,6 @@
       '</div>' +
       '<div class="panel" style="padding:16px 18px;margin-top:16px"><h2 style="margin:0 0 8px;font-size:15px">Calibration chart</h2>' + calChart() + '</div>';
   }
-
   function renderComps() {
     var live = (D.live || []).slice().sort(function (a, b) { return (num(b.mcap_usd) || 0) - (num(a.mcap_usd) || 0); });
     var h = '<div class="panel" style="padding:16px 18px"><div class="panel-h" style="padding:0 0 8px"><h2>Live-token comparables</h2><span class="hint">' + live.length + ' protocols with a trading token, from the same snapshot</span></div>' +
@@ -416,7 +426,6 @@
     }
     document.getElementById('comps').innerHTML = h;
   }
-
   var views = ['board', 'detail', 'model', 'comps'];
   function route() {
     var hash = (window.location.hash || '').replace(/^#\/?/, '');
@@ -438,7 +447,6 @@
     window.scrollTo(0, 0);
   }
   window.addEventListener('hashchange', route);
-
   renderStats();
   renderTop10();
   renderBoard();
