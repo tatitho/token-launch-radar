@@ -136,9 +136,24 @@ const dossierTextBytes = Buffer.byteLength(
   'utf8',
 );
 
+// --- netting summary (printed for the record; the same numbers live per
+// row in data.js). Pool net is the total low-end slice minus $25 gas;
+// per-user net assumes a pro-rata share of that slice. ---
+const netPerUser = radar.rows
+  .map((r) => r.farm.net_per_user_low_usd)
+  .sort((a, b) => a - b);
+const medianNetPerUser =
+  netPerUser.length === 0
+    ? 0
+    : netPerUser[Math.floor(netPerUser.length / 2)]!;
+const positiveNet = netPerUser.filter((n) => n > 0).length;
+
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored\n` +
-    `token radar: LOO n=${radar.model.loo.n} MAPE ${(radar.model.loo.mape * 100).toFixed(1)}% median|log| ${radar.model.loo.medianAbsLogErr.toFixed(3)}\n` +
+    `token radar: LOO n=${radar.model.loo.n} MAPE ${(radar.model.loo.mape * 100).toFixed(1)}% median|log| ${radar.model.loo.medianAbsLogErr.toFixed(3)} within 2x ${(radar.model.loo.within2x * 100).toFixed(1)}%\n` +
+    `token radar: LOO calibration set n=${radar.model.looCal.n} MAPE ${(radar.model.looCal.mape * 100).toFixed(1)}% median|log| ${radar.model.looCal.medianAbsLogErr.toFixed(3)} within 2x ${(radar.model.looCal.within2x * 100).toFixed(1)}% robust mcap>=$1M MAPE ${(radar.model.looCal.robust.mape * 100).toFixed(1)}% median|log| ${radar.model.looCal.robust.medianAbsLogErr.toFixed(3)}\n` +
+    `token radar: netting: pool net low-end top 10: ${radar.rows.slice(0, 10).map((r) => `${r.slug} $${r.farm.pool_net_low_usd.toLocaleString('en-US')}`).join(', ')}\n` +
+    `token radar: netting: median net per-user $${medianNetPerUser.toFixed(2)} (${positiveNet}/${radar.rows.length} rows positive at plan capital)\n` +
     `token radar: farm audit: ${farmSteps} steps, 100% with cost and/or duration, ${((farmBoth / farmSteps) * 100).toFixed(1)}% with both\n` +
     `token radar: top 10: ${board.slice(0, 10).map((r) => `${r.slug} $${r.implied_value_usd}`).join(', ')}\n` +
     `token radar: dossier text ${dossierTextBytes} bytes (cap ${TEXT_MAX_BYTES})\n` +
