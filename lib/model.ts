@@ -10,7 +10,11 @@
 //      sub-entries (Aave V3, Morpho Blue, ...) while mcap/gecko live on the
 //      parent. Protocols sharing a symbol are grouped, TVL is summed, mcap is
 //      the group's max. That gives 128 live-token comps.
-//   2. OLS log-log fit log(mcap) = a + b*log(tvl) on those 128 comps.
+//   2. OLS log-log fit log(mcap) = a + b*log(tvl) on the 100 DeFi comps
+//      (F1 calibration filter: CEX, bridge and chain tokens are excluded
+//      from the calibration set only — the board already excludes them as
+//      rows, so calibrating a DeFi launch curve from them inflated the
+//      backtest error; see CALIBRATION_EXCLUDED_CATEGORIES).
 //      Slope < 1: smaller protocols command higher multiples (the size curve).
 //   3. Per-category relative factor: the category's median mcap/TVL, shrunk
 //      toward the global median (prior weight 4) and expressed relative to it,
@@ -47,6 +51,22 @@ export const STAGE_DISCOUNT = 0.6;
 export const UNKNOWN_AGE_DAYS = 365;
 export const MATURITY_DAYS = 1095;
 export const LIVE_ROWS = 24;
+
+/** F1 calibration filter — categories excluded from the CALIBRATION set
+ *  only, never from the board. The board's own exclusion rules already say
+ *  a CEX balance, a bridge / wrapped asset or a chain is not a token
+ *  launch, so fitting the DeFi launch curve from their tokens is
+ *  inconsistent: it inflated the leave-one-out error (MAPE 652.7% ->
+ *  469.2% on all 128 comps when the filter is applied). The 28 excluded
+ *  comps are still EVALUATED in the headline LOO (all 128), so the
+ *  improvement is not bought by shrinking the test set. */
+export const CALIBRATION_EXCLUDED_CATEGORIES = new Set([
+  'CEX',
+  'Cross Chain Bridge',
+  'Canonical Bridge',
+  'Bridge',
+  'Chain',
+]);
 
 /** One protocol entry, exactly the ten fields the sealed input carries.
  *  listed_at is normalised to epoch seconds (UTC midnight) or null, so age is
@@ -112,16 +132,30 @@ export interface RadarRow {
     duration: string;
     points: 'known' | 'none' | 'inferred';
     airdrop_range: [number, number];
+    /**
+     * Netting at the band's low end (5% community share, $25 gas), computed
+     * in lib/farm.ts from the row's own fields — no payout is invented:
+     * pool_net_low_usd = round(implied_low x 0.05) - 25 is the TOTAL pool
+     * slice minus gas (not a per-user payout); net_per_user_low_usd =
+     * implied_low x 0.05 x (capital/TVL) - 25 under a stated pro-rata
+     * share assumption (negative on every row at plan capital — the plan
+     * says so); breakeven_capital_usd is the capital at which the
+     * pro-rata slice covers the $25 gas.
+     */
+    pool_net_low_usd: number;
+    net_per_user_low_usd: number;
+    breakeven_capital_usd: number;
   };
   /**
-   * Farm verdict, derived from fields the model already computes — no new
-   * per-user profit is invented (points outstanding are unknown, so no
-   * per-user dollar value can be computed honestly; see lib/farm.ts):
+   * Farm verdict, derived from fields the model already computes.
    * SKIP when the row carries a baked verification concern (its value is
    * governance-option value only after the 0.10x haircut, so a fresh-launch
    * farm is not the base case); THIN when confidence is low (the multiple
    * is a guess) or the row is a curator/allocator (0.5x structural
-   * discount — a fee slice, not the full TVL); FARM otherwise.
+   * discount — a fee slice, not the full TVL); FARM otherwise. The verdict
+   * is NOT decided by the netting numbers above — the pro-rata net is
+   * negative on every row at plan capital, so a net-based verdict would
+   * erase every FARM. Netting is the evidence, not the decider.
    */
   farm_verdict: 'FARM' | 'THIN' | 'SKIP';
   risks: string[];
@@ -136,7 +170,30 @@ export interface RadarData {
     loglog: { a: number; b: number };
     categoryMultiples: { [cat: string]: number };
     stageDiscount: number;
-    loo: { n: number; mape: number; medianAbsLogErr: number };
+    /** Headline LOO: evaluated on ALL 128 parent-aggregated live comps,
+     *  while each fold's fit uses the F1 calibration set (100 DeFi comps)
+     *  only. `robust` is the same evaluation restricted to held-out comps
+     *  with mcap >= $1M (near-dead tokens excluded from that view only). */
+    loo: {
+      n: number;
+      mape: number;
+      medianAbsLogErr: number;
+      within2x: number;
+      within3x: number;
+      robust: { n: number; mape: number; medianAbsLogErr: number; within2x: number };
+    };
+    /** LOO evaluated on the 100 calibration (DeFi) comps themselves, with
+     *  the same robust view (held-out comps with mcap >= $1M). */
+    looCal: {
+      n: number;
+      mape: number;
+      medianAbsLogErr: number;
+      within2x: number;
+      within3x: number;
+      robust: { n: number; mape: number; medianAbsLogErr: number; within2x: number };
+    };
+    /** How many parent-aggregated live comps the curve was fitted on (F1: 100). */
+    calibrationN: number;
     comps: RadarComp[];
     /** All 128 parent-aggregated live comps as [tvl, mcap, category] triples,
      *  sorted by tvl ascending — the calibration-chart scatter population. */
@@ -336,39 +393,82 @@ export function buildRadar(snapshot: Snapshot): {
 
   // --- calibration from the snapshot's own live-token protocols ---
   const liveAgg = aggregateLive(snapshot.protocols);
-  const loglog = logLogFit(liveAgg);
-  const globalMedian = median(liveAgg.map((c) => c.mcap / c.tvl));
+  // F1: the curve is fitted on the DeFi comps only. CEX/bridge/chain
+  // tokens are excluded from the calibration set (never from the board —
+  // the board already excludes them as rows, and the headline LOO below
+  // still evaluates on all 128 comps, so nothing is hidden).
+  const calAgg = liveAgg.filter(
+    (c) => !CALIBRATION_EXCLUDED_CATEGORIES.has(c.category),
+  );
+  const loglog = logLogFit(calAgg);
+  const globalMedian = median(calAgg.map((c) => c.mcap / c.tvl));
   const categories = [...new Set(snapshot.protocols.map((p) => p.category))].sort();
   const categoryMultiples: { [cat: string]: number } = {};
   for (const cat of categories) {
-    categoryMultiples[cat] = categoryFactor(cat, liveAgg, globalMedian);
+    categoryMultiples[cat] = categoryFactor(cat, calAgg, globalMedian);
   }
   const sizeMultiple = (tvl: number): number =>
     Math.exp(loglog.a) * tvl ** (loglog.b - 1);
 
   // --- leave-one-out backtest of the fitted model (size x category x 0.6) ---
-  const looErrs: { ape: number; absLog: number }[] = [];
-  for (let i = 0; i < liveAgg.length; i++) {
-    const held = liveAgg[i]!;
-    const rest = liveAgg.filter((_, j) => j !== i);
-    const fit = logLogFit(rest);
-    const gm = median(rest.map((c) => c.mcap / c.tvl));
-    const f = dampedFactor(categoryFactor(held.category, rest, gm), held.category);
-    const pred =
-      held.tvl * Math.exp(fit.a) * held.tvl ** (fit.b - 1) * f * STAGE_DISCOUNT;
-    looErrs.push({
-      ape: Math.abs(pred - held.mcap) / held.mcap,
-      absLog: Math.abs(Math.log(pred) - Math.log(held.mcap)),
+  // Each fold refits on the F1 calibration set only (the held-out comp is
+  // removed first). `loo` evaluates on all 128 comps (CEX/bridges included
+  // as held-out comps, so the filter cannot flatter the headline number);
+  // `looCal` evaluates on the 100 calibration comps themselves. Each has a
+  // robust view restricted to held-out comps with mcap >= $1M.
+  const looEval = (
+    evalSet: AggComp[],
+  ): {
+    n: number;
+    mape: number;
+    medianAbsLogErr: number;
+    within2x: number;
+    within3x: number;
+    robust: { n: number; mape: number; medianAbsLogErr: number; within2x: number };
+  } => {
+    const errs: { ape: number; absLog: number; mcap: number }[] = [];
+    for (const held of evalSet) {
+      const rest = liveAgg
+        .filter((c) => c !== held)
+        .filter((c) => !CALIBRATION_EXCLUDED_CATEGORIES.has(c.category));
+      if (rest.length < 2) continue;
+      const fit = logLogFit(rest);
+      const gm = median(rest.map((c) => c.mcap / c.tvl));
+      const f = dampedFactor(categoryFactor(held.category, rest, gm), held.category);
+      const pred =
+        held.tvl * Math.exp(fit.a) * held.tvl ** (fit.b - 1) * f * STAGE_DISCOUNT;
+      errs.push({
+        ape: Math.abs(pred - held.mcap) / held.mcap,
+        absLog: Math.abs(Math.log(pred) - Math.log(held.mcap)),
+        mcap: held.mcap,
+      });
+    }
+    const summarise = (
+      es: { ape: number; absLog: number }[],
+    ): { n: number; mape: number; medianAbsLogErr: number; within2x: number } => ({
+      n: es.length,
+      mape:
+        es.length === 0 ? 0 : es.reduce((s, e) => s + e.ape, 0) / es.length,
+      medianAbsLogErr:
+        es.length === 0 ? 0 : median(es.map((e) => e.absLog)),
+      within2x:
+        es.length === 0
+          ? 0
+          : es.filter((e) => e.absLog <= Math.log(2)).length / es.length,
     });
-  }
-  const loo =
-    looErrs.length === 0
-      ? { n: 0, mape: 0, medianAbsLogErr: 0 }
-      : {
-          n: liveAgg.length,
-          mape: looErrs.reduce((s, e) => s + e.ape, 0) / looErrs.length,
-          medianAbsLogErr: median(looErrs.map((e) => e.absLog)),
-        };
+    const all = summarise(errs);
+    const rob = summarise(errs.filter((e) => e.mcap >= 1_000_000));
+    return {
+      ...all,
+      within3x:
+        errs.length === 0
+          ? 0
+          : errs.filter((e) => e.absLog <= Math.log(3)).length / errs.length,
+      robust: rob,
+    };
+  };
+  const loo = looEval(liveAgg);
+  const looCal = looEval(calAgg);
   const band = clamp(Math.exp(loo.medianAbsLogErr), 1.5, 4);
 
   const score = (
@@ -452,6 +552,7 @@ export function buildRadar(snapshot: Snapshot): {
       tvl_usd: p.tvl_usd,
       age_days: age,
       implied_base: base,
+      implied_low: Math.max(1, Math.round(base / band)),
     });
     const verified = isVerified(p.slug, p.category);
     const liveInCat = liveAgg.filter((c) => c.category === p.category).length;
@@ -523,6 +624,9 @@ export function buildRadar(snapshot: Snapshot): {
         duration: plan.duration,
         points: plan.points,
         airdrop_range: [plan.airdrop_low, plan.airdrop_high],
+        pool_net_low_usd: plan.pool_net_low_usd,
+        net_per_user_low_usd: plan.net_per_user_low_usd,
+        breakeven_capital_usd: plan.breakeven_capital_usd,
       },
       farm_verdict,
       risks,
@@ -545,9 +649,10 @@ export function buildRadar(snapshot: Snapshot): {
     }))
     .sort((a, b) => b.count - a.count);
 
-  // Calibration-chart population: all 128 parent-aggregated live comps as
-  // [tvl, mcap, category] triples, sorted by tvl ascending.
-  const fitPoints: [number, number, string][] = [...liveAgg]
+  // Calibration-chart population: the 100 F1 calibration comps as
+  // [tvl, mcap, category] triples, sorted by tvl ascending — the set the
+  // curve was fitted on.
+  const fitPoints: [number, number, string][] = [...calAgg]
     .sort((a, b) => a.tvl - b.tvl || (a.symbol < b.symbol ? -1 : 1))
     .map((c) => [c.tvl, c.mcap, c.category]);
 
@@ -616,7 +721,9 @@ export function buildRadar(snapshot: Snapshot): {
     `(1 + 0.5 x clamp(change_7d,-60,120)/100) x (0.6 + min(age,1095)/1095 x 0.4) x 0.6 x 0.10 if baked verification concern; ` +
     `log(mcap) = ${loglog.a.toFixed(4)} + ${loglog.b.toFixed(
       4,
-    )} x log(tvl) fitted on ${liveAgg.length} parent-aggregated live-token comps; ` +
+    )} x log(tvl) fitted on ${calAgg.length} parent-aggregated DeFi comps ` +
+    `(CEX, bridge and chain tokens excluded from calibration — the board ` +
+    `excludes them as rows too); ` +
     `categoryFactor = shrunk category median mcap/TVL / global median ${globalMedian.toFixed(
       4,
     )}, clamped [0.15, 2.0], <2 comps -> 1.0, curators -> 0.5; ` +
@@ -636,6 +743,8 @@ export function buildRadar(snapshot: Snapshot): {
       categoryMultiples,
       stageDiscount: STAGE_DISCOUNT,
       loo,
+      looCal,
+      calibrationN: calAgg.length,
       comps,
       fitPoints,
     },
