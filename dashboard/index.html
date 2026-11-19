@@ -30,15 +30,23 @@
   <section id="view-board" class="view">
     <div id="stats" class="stats" aria-label="Coverage summary"></div>
 
+    <div class="board-grid" id="board-grid">
     <div class="panel top10">
       <div class="panel-h">
         <h2>Top 10 &mdash; highest implied launch value</h2>
-        <span class="hint">Rank 1 is the largest implied FDV. Click any row for its farm plan.</span>
+        <span class="hint">Click any row for its farm plan.</span>
       </div>
       <div class="tbl-wrap"><table class="tbl" id="top10tbl">
         <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>TVL</th><th>7d</th><th>Implied FDV</th><th>Conf.</th></tr></thead>
         <tbody id="top10body"><tr><td colspan="7" class="mut">Loading board&hellip;</td></tr></tbody>
       </table></div>
+    </div>
+    <div class="panel">
+      <div class="panel-h">
+        <h2>Fit vs live comps</h2>
+      </div>
+      <div style="padding:4px 16px 14px" id="board-scatter"></div>
+    </div>
     </div>
 
     <div class="panel filters" aria-label="Board filters">
@@ -61,6 +69,7 @@
         <label><span>Sort by</span><select id="f-sort">
           <option value="rank">Rank</option><option value="implied">Implied FDV</option>
           <option value="tvl">TVL</option><option value="age">Age</option><option value="chg">7d change</option>
+          <option value="net">Net $</option><option value="neth">Net per hour</option>
         </select></label>
         <button id="f-dir" type="button" title="Toggle sort direction">&#8595; desc</button>
         <button id="f-reset" type="button">Reset filters</button>
@@ -73,11 +82,11 @@
         <thead><tr>
           <th data-sort="rank">#</th><th>Protocol</th><th>Category</th><th>Chains</th>
           <th data-sort="tvl">TVL</th><th data-sort="chg">7d</th><th data-sort="age">Age</th>
-          <th data-sort="implied">Implied FDV</th><th>Conf.</th>
+          <th data-sort="implied">Implied FDV</th><th data-sort="net">Net</th><th data-sort="neth">Net/h</th><th>Conf.</th>
         </tr></thead>
-        <tbody id="tbody"><tr><td colspan="9" class="mut">Loading board&hellip;</td></tr></tbody>
+        <tbody id="tbody"><tr><td colspan="11" class="mut">Loading board&hellip;</td></tr></tbody>
       </table></div>
-      <p class="foot-note">Implied FDV is a range (low / base / bull) in the detail view. Values come from the snapshot&rsquo;s own live-token comparables &mdash; see Model &amp; audit. Rows marked <span class="wl-dot" aria-hidden="true"></span> are on the 40-protocol watchlist.</p>
+      <p class="foot-note">Implied FDV is a range (low / base / bull) in the detail view. Values come from the snapshot&rsquo;s own live-token comparables &mdash; see Model &amp; audit.</p>
     </div>
   </section>
 

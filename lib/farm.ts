@@ -616,8 +616,7 @@ const OVERRIDES: Record<string, (f: RowFacts) => string[]> = {
 
 /** Full farm plan for one board row. Overrides win where curated; everything
  *  else is templated from the row's own facts. */
-export function farmPlanFor(f: RowFacts): FarmPlan {
-  const override = OVERRIDES[f.slug];
+export function farmPlanFor(f: RowFacts): FarmPlan {  const override = OVERRIDES[f.slug];
   let steps = override !== undefined ? override(f) : templateSteps(f);
   if (f.top30) {
     // v3 (radar-4): the top-30 plans carry 7 steps. Template rows get the
@@ -794,4 +793,81 @@ function monitorStep(f: RowFacts): string {
 /** Slugs with a curated (hand-written, protocol-specific) farm plan. */
 export function curatedSlugs(): string[] {
   return Object.keys(OVERRIDES).sort();
+}
+
+export interface FarmEconomics {
+  /** User's slice: implied FDV x 15% x (ticket / TVL), USD. */
+  slice: number;
+  /** Sum of the gas/fee budgets stated in the plan's steps, USD. */
+  fees: number;
+  /** T-bill forgone: 4% annual on the ticket over the holding window, USD. */
+  tbill: number;
+  /** Hands-on hours: 0.5h per plan step (holding window is waiting time). */
+  hours: number;
+  /** slice - fees - T-bill, USD. */
+  net: number;
+  /** net / hours, USD per hands-on hour. */
+  netPerHour: number;
+  /** Ticket size at which net = 0, USD; null when it never breaks even. */
+  breakEven: number | null;
+  verdict: 'farm' | 'marginal' | 'skip';
+}
+
+/** Midpoint of the first gas/fee range stated in a step, or 0. Only ranges
+ *  followed by "in gas / fees / bridge / on-chain fees" count — the
+ *  airdrop range ("$1.2M–$6.1M at a 5–25% share") and the sizing step's
+ *  parenthetical gas reference do not. */
+function stepFeeUsd(step: string): number {
+  const m = step.match(
+    /\$(\d+)\s*[–-]\s*(\d+)\s+in\s+(gas|fees|bridge|on-chain fees)/,
+  );
+  if (!m) return 0;
+  return (Number(m[1]) + Number(m[2])) / 2;
+}
+
+/** Holding-window midpoint in years, parsed from "60–90 days". */
+function windowYears(duration: string): number {
+  const m = duration.match(/(\d+)\s*[–-]\s*(\d+)\s+days/);
+  if (!m) return 45 / 365;
+  return (Number(m[1]) + Number(m[2])) / 2 / 365;
+}
+
+/**
+ * Per-row farm economics (v4, L5), computed from the plan's own steps.
+ * slice = implied FDV x 15% (midpoint of the 5–25% community share) x
+ * (ticket / TVL): the user's pro-rata share of the community allocation
+ * if it is split by deposited share. fees = midpoints of the gas/fee
+ * ranges stated in the steps. T-bill forgone = 4% annual on the ticket
+ * over the holding window. Hands-on time = 0.5h per plan step (the
+ * holding window is waiting time, not hands-on time). net = slice -
+ * fees - T-bill. break-even = the ticket size at which net = 0, or null
+ * when the slice rate never covers the T-bill rate. Verdict: farm when
+ * net > 0, marginal when the slice covers fees but not the T-bill,
+ * else skip. All assumptions are stated in METHOD.md section 6.
+ */
+export function farmEconomics(opts: {
+  steps: string[];
+  capitalUsd: number;
+  tvlUsd: number;
+  impliedBase: number;
+  duration: string;
+}): FarmEconomics {
+  const fees = opts.steps.reduce((s, st) => s + stepFeeUsd(st), 0);
+  const hours = opts.steps.length * 0.5;
+  const years = windowYears(opts.duration);
+  const tbill = opts.capitalUsd * 0.04 * years;
+  const slice =
+    opts.tvlUsd > 0
+      ? opts.impliedBase * 0.15 * (opts.capitalUsd / opts.tvlUsd)
+      : 0;
+  const net = slice - fees - tbill;
+  const netPerHour = hours > 0 ? net / hours : 0;
+  const rate =
+    opts.tvlUsd > 0
+      ? (opts.impliedBase * 0.15) / opts.tvlUsd - 0.04 * years
+      : -1;
+  const breakEven = rate > 0 ? fees / rate : null;
+  const verdict: FarmEconomics['verdict'] =
+    net > 0 ? 'farm' : slice > fees ? 'marginal' : 'skip';
+  return { slice, fees, tbill, hours, net, netPerHour, breakEven, verdict };
 }

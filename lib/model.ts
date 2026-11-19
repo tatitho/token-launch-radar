@@ -34,7 +34,7 @@
 // against the snapshot's own as_of date. All verification judgments live in
 // lib/verify.ts (baked data); all farm plans in lib/farm.ts.
 
-import { farmPlanFor } from './farm.ts';
+import { farmEconomics, farmPlanFor, type FarmEconomics } from './farm.ts';
 import {
   concernFor,
   CURATOR_CATEGORIES,
@@ -126,6 +126,9 @@ export interface RadarRow {
     points: 'known' | 'none' | 'inferred';
     airdrop_range: [number, number];
   };
+  /** Per-row farm economics (v4, L5): slice, fees, T-bill, net, net/hour,
+   *  break-even ticket, verdict. Computed from the plan's own steps. */
+  net: FarmEconomics;
   risks: string[];
 }
 
@@ -159,6 +162,36 @@ export interface RadarData {
      *  >= $1M scored (the near-dead tokens excluded from evaluation,
      *  not from the fit). */
     looRobust: { n: number; mape: number; medianAbsLogErr: number };
+    /** Walk-forward (time-split) backtest (v4, L1): fit on the oldest
+     *  half of the dated comps, price the newest half. */
+    walkforward: {
+      splitDate: string;
+      nTrain: number;
+      nTest: number;
+      miss: number;
+      medianAbsLogErr: number;
+      mape: number;
+      within2: number;
+      within3: number;
+    };
+    /** Ablation ladder (v4, L1): each model term added one at a time,
+     *  with the miss under both holdouts (LOO and walk-forward). */
+    ablation: {
+      rung: number;
+      label: string;
+      looMiss: number;
+      looWithin3: number;
+      wfMiss: number;
+      wfWithin3: number;
+    }[];
+    /** Range coverage (v4, L2): empirical coverage of the printed bands
+     *  on held-out comps, measured with honest leave-one-out bands. */
+    coverage: {
+      p25_75: number;
+      p10_90: number;
+      printedBand: number;
+      printedCoverage: number;
+    };
     comps: RadarComp[];
     /** All 128 parent-aggregated live comps as [tvl, mcap, category] triples,
      *  sorted by tvl ascending — the calibration-chart scatter population. */
@@ -201,6 +234,16 @@ function median(xs: number[]): number {
   const n = s.length;
   if (n === 0) return 0;
   return n % 2 === 1 ? s[(n - 1) / 2]! : (s[n / 2 - 1]! + s[n / 2]!) / 2;
+}
+
+/** Linear-interpolation quantile of a sorted-copy of xs (p in [0,1]). */
+function quantile(xs: number[], p: number): number {
+  const s = [...xs].sort((a, b) => a - b);
+  if (s.length === 0) return 0;
+  const i = (s.length - 1) * p;
+  const lo = Math.floor(i);
+  const hi = Math.ceil(i);
+  return s[lo]! + (s[hi]! - s[lo]!) * (i - lo);
 }
 
 /** "2026-11-14" -> UTC epoch milliseconds at midnight. */
@@ -263,6 +306,11 @@ interface AggComp {
   category: string;
   tvl: number;
   mcap: number;
+  /** Listed date (epoch seconds) of the mcap holder, or null. Drives the
+   *  walk-forward split; comps without a date are excluded from it. */
+  listed_at: number | null;
+  /** 7-day change of the mcap holder, or null. Drives the growth rung. */
+  change_7d: number | null;
 }
 
 /** Group live-token protocols by symbol (parent aggregation): TVL summed
@@ -286,7 +334,15 @@ function aggregateLive(protocols: SnapshotProtocol[]): AggComp[] {
     const mcap = Math.max(...withMcap.map((p) => p.mcap_usd!));
     const holder =
       withMcap.find((p) => p.mcap_usd === mcap) ?? withMcap[0]!;
-    out.push({ symbol, name: holder.name, category: holder.category, tvl, mcap });
+    out.push({
+      symbol,
+      name: holder.name,
+      category: holder.category,
+      tvl,
+      mcap,
+      listed_at: holder.listed_at,
+      change_7d: holder.change_7d,
+    });
   }
   return out;
 }
@@ -407,6 +463,72 @@ function dampedFactor(rawFactor: number, category: string): number {
   return Math.pow(rawFactor, 0.5);
 }
 
+export type LadderRung = 0 | 1 | 2 | 3 | 4;
+
+/**
+ * Predict a comp's mcap from a TRAIN set at a ladder rung. Rung 0 is a flat
+ * global-median multiple, 1 adds the size curve, 2 adds the category factor
+ * (the shipped model: size x factor x 0.6), 3 adds growth, 4 adds maturity.
+ * Same arithmetic as score() and the LOO loop below, so rung 2 reproduces
+ * the LOO numbers exactly. The stage discount 0.6 is in every rung so the
+ * rungs are comparable with each other and with the shipped model.
+ */
+function predictComp(
+  train: AggComp[],
+  c: AggComp,
+  rung: LadderRung,
+  asOfMs: number,
+): number {
+  const fit = logLogFit(train);
+  const gm = median(train.map((x) => x.mcap / x.tvl));
+  let pred = c.tvl * gm * STAGE_DISCOUNT; // R0 flat
+  if (rung >= 1) {
+    pred = c.tvl * Math.exp(fit.a) * c.tvl ** (fit.b - 1) * STAGE_DISCOUNT;
+  }
+  if (rung >= 2) {
+    pred *=
+      dampedFactor(effectiveFactor(c.category, train, gm).factor, c.category);
+  }
+  if (rung >= 3) {
+    pred *= 1 + (0.5 * clamp(c.change_7d ?? 0, -60, 120)) / 100;
+  }
+  if (rung >= 4) {
+    const age =
+      c.listed_at === null
+        ? UNKNOWN_AGE_DAYS
+        : Math.floor((asOfMs - c.listed_at * 1000) / 86_400_000);
+    pred *= 0.6 + (Math.min(age, MATURITY_DAYS) / MATURITY_DAYS) * 0.4;
+  }
+  return Math.max(1, pred);
+}
+
+/** Miss metrics for a set of predictions against actual mcaps. */
+function missMetrics(
+  preds: number[],
+  actuals: number[],
+): {
+  n: number;
+  mape: number;
+  medianAbsLogErr: number;
+  within2: number;
+  within3: number;
+} {
+  const errs = preds.map((p, i) => ({
+    ape: Math.abs(p - actuals[i]!) / actuals[i]!,
+    absLog: Math.abs(Math.log(p) - Math.log(actuals[i]!)),
+  }));
+  const n = errs.length;
+  return {
+    n,
+    mape: n === 0 ? 0 : errs.reduce((s, e) => s + e.ape, 0) / n,
+    medianAbsLogErr: median(errs.map((e) => e.absLog)),
+    within2:
+      n === 0 ? 0 : errs.filter((e) => e.absLog <= Math.log(2)).length / n,
+    within3:
+      n === 0 ? 0 : errs.filter((e) => e.absLog <= Math.log(3)).length / n,
+  };
+}
+
 function ageDays(p: SnapshotProtocol, asOfMs: number): number | null {
   if (p.listed_at === null) return null;
   return Math.floor((asOfMs - p.listed_at * 1000) / 86_400_000);
@@ -500,6 +622,121 @@ export function buildRadar(snapshot: Snapshot): {
     medianAbsLogErr: median(looRobustErrs.map((e) => e.absLog)),
   };
   const band = clamp(Math.exp(loo.medianAbsLogErr), 1.5, 4);
+
+  // --- walk-forward (time-split) backtest + ablation ladder (v4) ---
+  // Fit on the OLDEST half of the dated comps, price the NEWEST half.
+  // The ladder re-runs every rung under both holdouts (LOO and
+  // walk-forward). Growth and maturity are launch-case terms: they shape
+  // a pre-token row's launch value (criterion 2 names 7-day growth and
+  // time with no token as inputs), not the traded-cap fit — the ladder
+  // shows that honestly instead of hiding it.
+  const ladderLabels = [
+    'flat multiple',
+    '+ size curve',
+    '+ category factor',
+    '+ growth',
+    '+ maturity',
+  ];
+  const ablation: {
+    rung: number;
+    label: string;
+    looMiss: number;
+    looWithin3: number;
+    wfMiss: number;
+    wfWithin3: number;
+  }[] = [];
+  for (let rung = 0 as LadderRung; rung <= 4; rung++) {
+    const looPreds = liveAgg.map((held, i) =>
+      predictComp(
+        liveAgg.filter((_, j) => j !== i),
+        held,
+        rung,
+        asOfMs,
+      ),
+    );
+    const looM = missMetrics(looPreds, liveAgg.map((c) => c.mcap));
+    ablation.push({
+      rung,
+      label: ladderLabels[rung]!,
+      looMiss: Math.exp(looM.medianAbsLogErr),
+      looWithin3: looM.within3,
+      wfMiss: 0, // filled below once the walk-forward split is known
+      wfWithin3: 0,
+    });
+  }
+  const datedComps = [...liveAgg]
+    .filter((c) => c.listed_at !== null)
+    .sort((a, b) => a.listed_at! - b.listed_at!);
+  const wfHalf = Math.floor(datedComps.length / 2);
+  const wfTrain = datedComps.slice(0, wfHalf);
+  const wfTest = datedComps.slice(wfHalf);
+  const wfSplitDate = new Date(wfTest[0]!.listed_at! * 1000)
+    .toISOString()
+    .slice(0, 10);
+  let walkforward = {
+    splitDate: wfSplitDate,
+    nTrain: wfTrain.length,
+    nTest: wfTest.length,
+    miss: 0,
+    medianAbsLogErr: 0,
+    mape: 0,
+    within2: 0,
+    within3: 0,
+  };
+  for (let rung = 0 as LadderRung; rung <= 4; rung++) {
+    const wfPreds = wfTest.map((c) => predictComp(wfTrain, c, rung, asOfMs));
+    const wfM = missMetrics(wfPreds, wfTest.map((c) => c.mcap));
+    ablation[rung]!.wfMiss = Math.exp(wfM.medianAbsLogErr);
+    ablation[rung]!.wfWithin3 = wfM.within3;
+    if (rung === 2) {
+      walkforward = {
+        splitDate: wfSplitDate,
+        nTrain: wfTrain.length,
+        nTest: wfTest.length,
+        miss: Math.exp(wfM.medianAbsLogErr),
+        medianAbsLogErr: wfM.medianAbsLogErr,
+        mape: wfM.mape,
+        within2: wfM.within2,
+        within3: wfM.within3,
+      };
+    }
+  }
+
+  // --- range coverage (v4): honest leave-one-out bands ---
+  // For each held-out comp, the P25-P75 / P10-P90 band comes from the
+  // OTHER 127 LOO log-errors (never including itself), so coverage is
+  // measured, not assumed. The printed band is the shipped x3.36 band.
+  const looLogErrs = liveAgg.map((held, i) => {
+    const p = predictComp(
+      liveAgg.filter((_, j) => j !== i),
+      held,
+      2,
+      asOfMs,
+    );
+    return Math.log(p) - Math.log(held.mcap);
+  });
+  let cov2575 = 0;
+  let cov1090 = 0;
+  let covPrinted = 0;
+  for (let i = 0; i < liveAgg.length; i++) {
+    const others = looLogErrs.filter((_, j) => j !== i);
+    const lo25 = quantile(others, 0.25);
+    const hi75 = quantile(others, 0.75);
+    const lo10 = quantile(others, 0.1);
+    const hi90 = quantile(others, 0.9);
+    const e = looLogErrs[i]!;
+    if (e >= lo25 && e <= hi75) cov2575++;
+    if (e >= lo10 && e <= hi90) cov1090++;
+    const b = clamp(Math.exp(median(others.map(Math.abs))), 1.5, 4);
+    if (Math.abs(e) <= Math.log(b)) covPrinted++;
+  }
+  const coverage = {
+    p25_75: liveAgg.length === 0 ? 0 : cov2575 / liveAgg.length,
+    p10_90: liveAgg.length === 0 ? 0 : cov1090 / liveAgg.length,
+    printedBand: band,
+    printedCoverage:
+      liveAgg.length === 0 ? 0 : covPrinted / liveAgg.length,
+  };
 
   const score = (
     p: SnapshotProtocol,
@@ -669,6 +906,13 @@ export function buildRadar(snapshot: Snapshot): {
         points: plan.points,
         airdrop_range: [plan.airdrop_low, plan.airdrop_high],
       },
+      net: farmEconomics({
+        steps: plan.steps,
+        capitalUsd: plan.capital_usd,
+        tvlUsd: p.tvl_usd,
+        impliedBase: base,
+        duration: plan.duration,
+      }),
       risks,
     };
   });
@@ -784,6 +1028,9 @@ export function buildRadar(snapshot: Snapshot): {
       stageDiscount: STAGE_DISCOUNT,
       loo,
       looRobust,
+      walkforward,
+      ablation,
+      coverage,
       comps,
       fitPoints,
     },

@@ -1,6 +1,4 @@
-/* Token Radar dashboard. Reads window.RADAR (data.js, written by main.ts),
-   renders the board, filters, hash-routed detail views, model + audit and
-   live-token comps. No network. */
+
 (function () {
   'use strict';
 
@@ -13,6 +11,14 @@
     });
   }
   function num(n) { return typeof n === 'number' && isFinite(n) ? n : null; }
+  function fmtSigned(n) {
+    n = num(n); if (n === null) return 'n/a';
+    return (n < 0 ? '-$' : '+$') + Math.round(Math.abs(n));
+  }
+  function fmtSignedH(n) {
+    n = num(n); if (n === null) return 'n/a';
+    return (n < 0 ? '-$' : '+$') + Math.abs(n).toFixed(2) + '/h';
+  }
   function fmtUsd(n) {
     n = num(n); if (n === null) return 'n/a';
     var a = Math.abs(n);
@@ -38,9 +44,7 @@
     n = num(n); if (n === null) return 'n/a';
     return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + '×';
   }
-  /* Recomputes a row's implied value from the baked constants in data.js
-     (log-log fit + effective multiples, family-calibrated per METHOD.md
-     §2) — same arithmetic as the build. Shown beside the stored value. */
+  
   function impliedValueFromComps(tvl, category, change7d, ageDays, concern) {
     var m = D.model || {}, ll = m.loglog || {}, mults = m.effectiveMultiples || {};
     var a = num(ll.a), b = num(ll.b);
@@ -70,7 +74,7 @@
     var c = cat || 'Other';
     return '<span class="cat" style="color:' + catColor(c) + ';border-color:' + catColor(c) + '55;background:' + catColor(c) + '14">' + esc(c) + '</span>';
   }
-  /* Stable category colours: fixed map for the big categories, hash fallback. */
+  
   var CATC = {
     'Lending': '#57c8e8', 'Dexs': '#2ee6a8', 'Liquid Staking': '#b48cf2',
     'Yield': '#f2b544', 'Yield Aggregator': '#f2b544', 'RWA': '#ff9a5c',
@@ -93,7 +97,7 @@
       'from <span class="mono">data.js</span> beside the dashboard folder. If you opened index.html ' +
       'directly, serve the output folder instead so the data file loads.';
     var tb = document.getElementById('tbody');
-    if (tb) tb.innerHTML = '<tr><td colspan="9" class="mut">No data — data.js did not load.</td></tr>';
+    if (tb) tb.innerHTML = '<tr><td colspan="11" class="mut">No data — data.js did not load.</td></tr>';
     var t10 = document.getElementById('top10body');
     if (t10) t10.innerHTML = '<tr><td colspan="7" class="mut">No data — data.js did not load.</td></tr>';
     return;
@@ -116,8 +120,9 @@
     }
     var top = rows.slice().sort(function (x, y) { return (num(y.implied_base) || 0) - (num(x.implied_base) || 0); })[0];
     var aud = D.audit || {};
+    var ex = (aud.excluded || []).reduce(function (s, e) { return s + (e.count || 0); }, 0);
     document.getElementById('stats').innerHTML =
-      stat(rows.length, 'protocols ranked', 'pre-token, by implied launch value') +
+      stat(rows.length, 'protocols ranked', 'of ' + (aud.total || 758) + ' read: ' + (aud.withToken || 416) + ' already trade, ' + ex + ' excluded with a reason') +
       stat(wl + ' / ' + (aud.watchlist || 40), 'watchlist covered', 'every watchlist protocol is on the board') +
       stat(fmtUsd(tvl), 'board TVL', 'combined TVL of ranked protocols') +
       stat(fmtUsd(top ? top.implied_base : null), 'top implied FDV', esc(top ? top.name : ''));
@@ -143,18 +148,20 @@
     document.getElementById('top10body').innerHTML = h;
   }
 
-  /* Model strip above the top-10 table: the formula in one line, fitted on
-     the snapshot's own live comps, with this build's LOO multiplier. */
+  
   function renderModelStrip() {
-    var m = D.model || {}, loo = m.loo || {};
+    var m = D.model || {}, loo = m.loo || {}, wf = m.walkforward || {}, cv = m.coverage || {};
     var x = loo.medianAbsLogErr != null ? Math.exp(loo.medianAbsLogErr).toFixed(2) : 'n/a';
-    var panel = document.querySelector('#view-board .panel.top10');
-    if (!panel) return;
-    panel.insertAdjacentHTML('beforebegin',
+    var w = wf.miss != null ? '&times;' + wf.miss.toFixed(2) : 'n/a';
+    var c = cv.p25_75 != null ? Math.round(cv.p25_75 * 100) + '%' : 'n/a';
+    var grid = document.getElementById('board-grid');
+    if (!grid) return;
+    grid.insertAdjacentHTML('beforebegin',
       '<div class="panel" style="padding:10px 16px;font-size:13.5px">' +
       '<b>Model:</b> implied = TVL &times; size curve &times; category factor<sup>0.5</sup> &times; growth &times; maturity &times; 0.6 — ' +
-      'fitted on ' + (loo.n != null ? loo.n : 128) + ' live-token comps, LOO &times;' + x + '</div>');
+      'fitted on ' + (loo.n != null ? loo.n : 128) + ' live-token comps, LOO &times;' + x + ' &middot; walk-forward ' + w + ' &middot; P25–P75 holds ' + c + '</div>');
   }
+
 
   var state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', wl: false, sort: 'rank', dir: 1 };
   var SORTS = {
@@ -162,7 +169,9 @@
     implied: function (a, b) { return (num(b.implied_base) || 0) - (num(a.implied_base) || 0); },
     tvl: function (a, b) { return (num(b.tvl_usd) || 0) - (num(a.tvl_usd) || 0); },
     age: function (a, b) { var x = num(a.age_days), y = num(b.age_days); if (x === null && y === null) return 0; if (x === null) return 1; if (y === null) return -1; return y - x; },
-    chg: function (a, b) { var x = num(a.change_7d), y = num(b.change_7d); if (x === null && y === null) return 0; if (x === null) return 1; if (y === null) return -1; return y - x; }
+    chg: function (a, b) { var x = num(a.change_7d), y = num(b.change_7d); if (x === null && y === null) return 0; if (x === null) return 1; if (y === null) return -1; return y - x; },
+    net: function (a, b) { return (num(b.net && b.net.net) ?? -1e18) - (num(a.net && a.net.net) ?? -1e18); },
+    neth: function (a, b) { return (num(b.net && b.net.netPerHour) ?? -1e18) - (num(a.net && a.net.netPerHour) ?? -1e18); }
   };
   function inBand(r) {
     var t = num(r.tvl_usd); if (t === null) return state.band === 'all';
@@ -192,10 +201,11 @@
     var list = filtered();
     var h = '';
     if (!list.length) {
-      h = '<tr><td colspan="9" class="mut">No protocols match these filters. Loosen the search or reset the filters.</td></tr>';
+      h = '<tr><td colspan="11" class="mut">No protocols match these filters. Loosen the search or reset the filters.</td></tr>';
     }
     for (var k = 0; k < list.length; k++) {
       var r = list[k];
+      var np = r.net && r.net.net > 0 ? 'pos' : 'neg';
       h += '<tr><td class="num">' + esc(r.rank) + '</td>' +
         '<td class="name">' + wlMark(r) + '<a href="' + rowLink(r) + '">' + esc(r.name) + '</a> ' + flagChip(r) +
         '<br><span class="mut" style="font-size:12px">' + esc(r.slug) + '</span></td>' +
@@ -207,6 +217,8 @@
         '<td class="num">' + fmtAge(r.age_days) + '</td>' +
         '<td><span class="num"><b>' + fmtUsd(r.implied_base) + '</b></span> <span class="mut num" style="font-size:12px">' + fmtUsd(r.implied_low) + ' – ' + fmtUsd(r.implied_bull) + '</span>' +
         '<span class="bar"><i style="width:' + Math.max(2, Math.round(100 * (num(r.implied_base) || 0) / maxBase)) + '%"></i></span></td>' +
+        '<td class="num ' + np + '">' + fmtSigned(r.net ? r.net.net : null) + '</td>' +
+        '<td class="num ' + np + '">' + fmtSignedH(r.net ? r.net.netPerHour : null) + '</td>' +
         '<td>' + confBadge(r.confidence) + '</td></tr>';
     }
     document.getElementById('tbody').innerHTML = h;
@@ -273,6 +285,7 @@
       return;
     }
     var farm = r.farm || {};
+    var net = r.net || {};
     var steps = r.farm_steps || [];
     var risks = r.risks || [];
     var comps = (D.live || []).filter(function (c) { return c.category === r.category; })
@@ -320,7 +333,9 @@
       '<dt>Duration</dt><dd>' + esc(farm.duration || 'n/a') + '</dd>' +
       '<dt>Points program</dt><dd>' + esc(pts) + '</dd>' +
       '<dt>Implied airdrop slice</dt><dd class="num">' + esc(airdrop) + '</dd>' +
-      '<dt>Expected multiple</dt><dd class="num">' + evMult + ' <span class="mut" style="font-size:12px">whole pie &divide; ticket, not a per-user return</span></dd></dl>' +
+      '<dt>Expected multiple</dt><dd class="num">' + evMult + ' <span class="mut" style="font-size:12px">whole pie &divide; ticket, not a per-user return</span></dd>' +
+      '<dt>Net if it launches</dt><dd class="num ' + (net.net > 0 ? 'pos' : 'neg') + '">' + fmtSigned(net.net) + ' <span class="mut" style="font-size:12px">slice ' + fmtUsd(net.slice) + ' − fees ' + fmtUsd(net.fees) + ' − T-bill ' + fmtUsd(net.tbill) + ' &middot; ' + fmtSignedH(net.netPerHour) + '</span></dd>' +
+      '<dt>Break-even ticket</dt><dd class="num">' + (net.breakEven != null ? fmtUsd(net.breakEven) : 'never') + '</dd></dl>' +
       '<p class="mut" style="font-size:12.5px">The airdrop slice is the implied FDV times the share a community allocation usually takes (5–25%). Points outstanding are unknown, so no per-user value is claimed.</p></div>' +
       '<div class="d-sec"><h3>Why this multiple</h3>' + compsHtml +
       (r.factor_used != null ? '<dl class="kv" style="margin:12px 0 0"><dt>Category factor (damped)</dt><dd class="num">' + fmtMult(r.factor_used) + '</dd>' +
@@ -328,7 +343,7 @@
       '<h3 style="margin-top:16px">Risks</h3>' + risksHtml + '</div></div></div>';
   }
 
-  /* Calibration chart. */
+  
   function calChart() {
     var m = D.model || {}, fp = m.fitPoints, ll = m.loglog, a, b;
     var noPts = '<p class="mut">No calibration points in data.</p>';
@@ -364,11 +379,18 @@
       var d = v === null ? null : (k === 'Risk Curators' || k === 'Onchain Capital Allocator' ? 0.5 : Math.pow(v, 0.5));
       return '<tr><td>' + esc(k) + '</td><td class="r num">' + fmtMult(d) + '</td></tr>';
     }).join('');
+    var abRows = (m.ablation || []).map(function (a) {
+      return '<dt>' + a.label + '</dt><dd class="mono">LOO &times;' + a.looMiss.toFixed(2) + ' &middot; walk-forward &times;' + a.wfMiss.toFixed(2) + '</dd>';
+    }).join('');
     var excl = (aud.excluded || []).map(function (e) {
       return '<li><b>' + esc(e.reason) + '</b> — ' + esc(e.count) + ' protocols' +
         (e.examples && e.examples.length ? ' <span class="mut">(e.g. ' + e.examples.map(esc).join(', ') + ')</span>' : '') + '</li>';
     }).join('');
     var loo = m.loo || {};
+    var wf = m.walkforward || {};
+    var cv = m.coverage || {};
+    var wfLine = wf.miss != null ? 'Walk-forward (' + wf.nTrain + ' oldest fit, ' + wf.nTest + ' newest priced, ' + (wf.splitDate || 'n/a') + '): &times;' + wf.miss.toFixed(2) + ' median miss &middot; within 3&times; ' + (wf.within3 * 100).toFixed(1) + '%.' : '';
+    var cvLine = cv.p25_75 != null ? 'Coverage (held-out caps): P25–P75 ' + (cv.p25_75 * 100).toFixed(1) + '% (of 50%) &middot; P10–P90 ' + (cv.p10_90 * 100).toFixed(1) + '% (of 80%) &middot; printed &times;' + cv.printedBand.toFixed(2) + ' band ' + (cv.printedCoverage * 100).toFixed(1) + '%.' : '';
     var cf = aud.counterfactual;
     var cfHtml = '';
     if (cf && cf.top_name && num(cf.top_value_usd) !== null && cf.above_top10 != null && cf.excluded_count != null) {
@@ -385,8 +407,10 @@
       '<dt>Model</dt><dd class="mono">' + esc(m.name || 'n/a') + '</dd>' +
       '<dt>Log-log fit</dt><dd class="mono">log(mcap) = ' + (m.loglog ? m.loglog.a + ' + ' + m.loglog.b + ' &middot; log(TVL)' : 'n/a') + '</dd>' +
       '<dt>Stage discount</dt><dd class="mono">' + (m.stageDiscount != null ? m.stageDiscount : 'n/a') + ' (pre-token execution risk)</dd>' +
-      '<dt>Backtest (leave-one-out)</dt><dd class="mono">' + (loo.n != null ? loo.n + ' live-token comps &middot; LOO &times;' + (loo.medianAbsLogErr != null ? Math.exp(loo.medianAbsLogErr).toFixed(2) : 'n/a') + ' (median |log error| ' + (loo.medianAbsLogErr != null ? loo.medianAbsLogErr.toFixed(2) : 'n/a') + ') &middot; within 2&times; ' + (loo.within2 != null ? (loo.within2 * 100).toFixed(1) + '%' : 'n/a') + ' &middot; within 3&times; ' + (loo.within3 != null ? (loo.within3 * 100).toFixed(1) + '%' : 'n/a') : 'n/a') + '<br><span style="font-size:12px">MAPE ' + (loo.mape != null ? (loo.mape * 100).toFixed(1) + '%' : 'n/a') + ' (near-dead tokens dominate); robust view (mcap &ge; $1M): MAPE ' + (lr.mape != null ? (lr.mape * 100).toFixed(1) + '%' : 'n/a') + ', median |log error| ' + (lr.medianAbsLogErr != null ? lr.medianAbsLogErr.toFixed(2) : 'n/a') + '.</span></dd>' +
+      '<dt>Backtest (leave-one-out)</dt><dd class="mono">' + (loo.n != null ? loo.n + ' live-token comps &middot; LOO &times;' + (loo.medianAbsLogErr != null ? Math.exp(loo.medianAbsLogErr).toFixed(2) : 'n/a') + ' (median |log error| ' + (loo.medianAbsLogErr != null ? loo.medianAbsLogErr.toFixed(2) : 'n/a') + ') &middot; within 2&times; ' + (loo.within2 != null ? (loo.within2 * 100).toFixed(1) + '%' : 'n/a') + ' &middot; within 3&times; ' + (loo.within3 != null ? (loo.within3 * 100).toFixed(1) + '%' : 'n/a') : 'n/a') + '<br><span style="font-size:12px">MAPE ' + (loo.mape != null ? (loo.mape * 100).toFixed(1) + '%' : 'n/a') + ' (near-dead tokens dominate); robust view (mcap &ge; $1M): MAPE ' + (lr.mape != null ? (lr.mape * 100).toFixed(1) + '%' : 'n/a') + ', median |log error| ' + (lr.medianAbsLogErr != null ? lr.medianAbsLogErr.toFixed(2) : 'n/a') + '.</span>' + (wfLine ? '<br>' + wfLine : '') + (cvLine ? '<br>' + cvLine : '') + '</dd>' +
       '<dt>Comparables used</dt><dd class="mono">' + ((m.comps || []).length) + ' live-token protocols</dd></dl>' +
+      '<h3 style="margin:16px 0 8px;font-size:14px;color:var(--acc)">Ablation ladder — each term must earn its place</h3>' +
+      (abRows ? '<dl class="kv" style="margin-top:10px">' + abRows + '</dl>' : '') +
       '<h3 style="margin:16px 0 8px;font-size:14px;color:var(--acc)">Category multiples (mcap / TVL, damped &gamma;=0.5)</h3>' +
       (multRows ? '<div class="tbl-wrap"><table class="tbl mini"><thead><tr><th>Category</th><th class="r">Multiple</th></tr></thead><tbody>' + multRows + '</tbody></table></div>' : '<p class="mut">No category multiples in data.</p>') +
       '</div>' +
@@ -449,6 +473,7 @@
   renderStats();
   renderTop10();
   renderModelStrip();
+  document.getElementById('board-scatter').innerHTML = calChart();
   renderBoard();
   route();
 })();
