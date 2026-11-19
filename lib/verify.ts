@@ -178,6 +178,62 @@ export const CURATOR_CATEGORIES = new Set([
   'Onchain Capital Allocator',
 ]);
 
+/**
+ * Functional super-categories ("families") for the v3 model (radar-4).
+ * A judgment, baked as data like everything else in this file: categories
+ * that do the same economic job are pooled, so a thin category inherits
+ * its family's comparable evidence instead of falling back to the global
+ * 1.0. The grouping is by what the protocol DOES with capital, not by
+ * name: vaults and allocators all take a fee on capital someone else
+ * deploys; money markets all intermediate collateral and credit; perps
+ * and derivatives all price a payoff off an underlying; staking
+ * variants all lock a token for yield or security. RWA (n=9) already
+ * has enough comps and is left alone; every category not listed here
+ * keeps the v2 rule (own factor when it has >= 2 comps, global 1.0
+ * otherwise). The family factor uses the same shrinkage (prior weight
+ * 4 toward the global median) and the same [0.15, 2.0] clamp as the
+ * category factor, and the curator 0.5x is NEVER replaced by a family
+ * factor — it is a structural nesting discount, not a fitted one.
+ * Measured (v3-spec §4.2, analyze4.py): Vaults & allocators 17 comps,
+ * Money markets 19, Perps & derivatives 11, Staking 15. */
+export const FAMILIES: Record<string, string[]> = {
+  'Vaults & allocators': [
+    'Risk Curators',
+    'Onchain Capital Allocator',
+    'Yield Aggregator',
+    'Liquidity Manager',
+    'Yield',
+  ],
+  'Money markets': [
+    'Lending',
+    'CDP',
+    'CDP Manager',
+    'Collateral Markets',
+    'Collateral Management',
+    'Uncollateralized Lending',
+  ],
+  'Perps & derivatives': [
+    'Derivatives',
+    'Basis Trading',
+    'Prediction Market',
+    'Options',
+    'Interest Rate Derivatives',
+  ],
+  Staking: [
+    'Liquid Staking',
+    'Restaking',
+    'Liquid Restaking',
+    'Staking Pool',
+  ],
+};
+
+/** Category -> the family it pools into, if any. */
+export const FAMILY_OF: Record<string, string> = Object.fromEntries(
+  Object.entries(FAMILIES).flatMap(([family, cats]) =>
+    cats.map((c) => [c, family] as [string, string]),
+  ),
+);
+
 /** Per-slug verification concerns for rows that ARE on the board (mostly
  *  watchlist rows the house forces in). Each maps to a risk string shown on
  *  the row. A slug listed here gets verified=false. */

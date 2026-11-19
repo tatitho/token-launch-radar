@@ -5,14 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
 <title>Token Radar — pre-token protocols ranked by implied launch value</title>
-<meta name="description" content="Token launch radar: every pre-token protocol in the sealed DefiLlama snapshot, ranked by comps-calibrated implied launch value, with a farm plan for each.">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <header class="top">
   <div class="wrap top-in">
     <div class="brand">
-      <span class="sweep" aria-hidden="true"></span>
       <div>
         <h1>TOKEN RADAR</h1>
         <p class="sub">Pre-token DeFi, ranked by implied launch value &middot; snapshot <span id="asof">&mdash;</span></p>
@@ -27,35 +25,19 @@
 </header>
 
 <main class="wrap" id="app">
-  <noscript><div class="err"><b>JavaScript is required</b> to see the board.</div></noscript>
   <div id="err" class="err" hidden></div>
 
   <section id="view-board" class="view">
     <div id="stats" class="stats" aria-label="Coverage summary"></div>
 
-    <div class="panel cover" aria-label="How this board is priced">
-      <h2>How this board is priced</h2>
-      <p class="formula-line mono">implied = exp(7.4578) &times; TVL<sup>0.4822</sup> &times; categoryFactor<sup>0.5</sup> &times; growth &times; maturity &times; 0.6 <span class="mut">(&times; 0.10 only for the 8 flagged rows)</span></p>
-      <p>One model prices this page and board.json: the numbers here are the numbers in the board file. The curve is fitted on the snapshot&rsquo;s own 100 liquid DeFi comps &mdash; log(mcap) = 7.4578 + 0.4822 &times; log(TVL) &mdash; CEX, bridge and chain tokens are excluded from calibration, as they are from the board. 416 protocols record a token; 342 pre-token audited; 201 ranked.</p>
-      <p>Backtest (leave-one-out, n = 100 liquid DeFi comps): median |log error| <b>1.168</b> &mdash; a typical error of 3.22&times;; 30.0% of comps predicted within 2&times;. On all 128 comps including CEX/bridges: 1.212 (3.36&times;). Time-split: 3.46&times;. The order is the signal; the exact dollar figures carry that error bar. 5 of the top 10 read THIN &mdash; Steakhouse, Gauntlet and Veda are vault curators (a fee slice, not the full TVL); Polymarket and Symbiotic are low-confidence (too few live comps to trust the multiple).</p>
-      <div class="judge" aria-label="Judge guide">
-        <b>Judge guide</b>
-        <span>1 &middot; Coverage: 40/40 watchlist, 201 rows &mdash; audit counts on the Model tab.</span>
-        <span>2 &middot; Model: LOO 3.22&times;, 100 DeFi comps &mdash; calibration in METHOD.md &sect;3.</span>
-        <span>3 &middot; Farm: every plan netted at the low end (top pool net $217,604) &mdash; Farm column.</span>
-        <span>4 &middot; Dashboard: sort, filter, detail view &mdash; try the Farm filter.</span>
-        <span>5 &middot; Looks: one dark palette, one model, one build.</span>
-      </div>
-    </div>
-
     <div class="panel top10">
       <div class="panel-h">
         <h2>Top 10 &mdash; highest implied launch value</h2>
-        <span class="hint">Click any row for its farm plan.</span>
+        <span class="hint">Rank 1 is the largest implied FDV. Click any row for its farm plan.</span>
       </div>
       <div class="tbl-wrap"><table class="tbl" id="top10tbl">
-        <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>TVL</th><th>7d</th><th>Implied value</th><th>Conf.</th><th>Farm</th></tr></thead>
-        <tbody id="top10body"><tr><td colspan="8" class="mut">Loading board&hellip;</td></tr></tbody>
+        <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>TVL</th><th>7d</th><th>Implied FDV</th><th>Conf.</th></tr></thead>
+        <tbody id="top10body"><tr><td colspan="7" class="mut">Loading board&hellip;</td></tr></tbody>
       </table></div>
     </div>
 
@@ -73,17 +55,12 @@
           <option value="all">Any confidence</option><option value="high">High</option>
           <option value="medium">Medium</option><option value="low">Low</option>
         </select></label>
-        <label><span>Farm verdict</span><select id="f-farm">
-          <option value="all">Any verdict</option><option value="FARM">FARM</option>
-          <option value="THIN">THIN</option><option value="SKIP">SKIP</option>
-        </select></label>
         <label class="f-check"><input id="f-wl" type="checkbox"> <span>Watchlist only</span></label>
       </div>
       <div class="f-row f-row2">
         <label><span>Sort by</span><select id="f-sort">
-          <option value="rank">Rank</option><option value="implied">Implied value</option>
+          <option value="rank">Rank</option><option value="implied">Implied FDV</option>
           <option value="tvl">TVL</option><option value="age">Age</option><option value="chg">7d change</option>
-          <option value="farm">Farm verdict</option>
         </select></label>
         <button id="f-dir" type="button" title="Toggle sort direction">&#8595; desc</button>
         <button id="f-reset" type="button">Reset filters</button>
@@ -96,11 +73,11 @@
         <thead><tr>
           <th data-sort="rank">#</th><th>Protocol</th><th>Category</th><th>Chains</th>
           <th data-sort="tvl">TVL</th><th data-sort="chg">7d</th><th data-sort="age">Age</th>
-          <th data-sort="implied">Implied value</th><th>Conf.</th><th data-sort="farm">Farm</th>
+          <th data-sort="implied">Implied FDV</th><th>Conf.</th>
         </tr></thead>
-        <tbody id="tbody"><tr><td colspan="10" class="mut">Loading board&hellip;</td></tr></tbody>
+        <tbody id="tbody"><tr><td colspan="9" class="mut">Loading board&hellip;</td></tr></tbody>
       </table></div>
-      <p class="foot-note">Implied value is a range (low / base / bull) in the detail view. Values come from the snapshot&rsquo;s own live-token comparables &mdash; see Model &amp; audit. Rows marked <span class="wl-dot" aria-hidden="true"></span> are on the 40-protocol watchlist. Farm verdict: FARM = verified launch case worth farming; THIN = low confidence or curator fee-slice only; SKIP = flagged row whose value is governance-option only. The verdict never promises a per-user payout.</p>
+      <p class="foot-note">Implied FDV is a range (low / base / bull) in the detail view. Values come from the snapshot&rsquo;s own live-token comparables &mdash; see Model &amp; audit. Rows marked <span class="wl-dot" aria-hidden="true"></span> are on the 40-protocol watchlist.</p>
     </div>
   </section>
 
@@ -119,7 +96,7 @@
 </main>
 
 <footer class="wrap foot">
-  <p>Source: sealed DefiLlama snapshot (<span id="asof2">&mdash;</span>). One model drives this page and the board file &mdash; the numbers here are the numbers in board.json. This page makes no network requests; every figure is baked into data.js. Implied values are estimates from comparables, not predictions &mdash; a token may never launch.</p>
+  <p>Source: sealed DefiLlama snapshot (<span id="asof2">&mdash;</span>). One model drives this page and board.json; this page makes no network requests — every figure is baked into data.js. Implied values are estimates from comparables, not predictions — a token may never launch.</p>
 </footer>
 
 <script src="../data.js"></script>

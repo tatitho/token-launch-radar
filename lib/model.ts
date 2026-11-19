@@ -1,4 +1,4 @@
-// model.ts — radar-3: the token radar's model.
+// model.ts — radar-4: the token radar's model.
 //
 // One snapshot of the protocol universe in, one ranked board out. The board
 // covers every slug in the snapshot's watchlist (the floor, never a ceiling)
@@ -10,19 +10,18 @@
 //      sub-entries (Aave V3, Morpho Blue, ...) while mcap/gecko live on the
 //      parent. Protocols sharing a symbol are grouped, TVL is summed, mcap is
 //      the group's max. That gives 128 live-token comps.
-//   2. OLS log-log fit log(mcap) = a + b*log(tvl) on the 100 DeFi comps
-//      (F1 calibration filter: CEX, bridge and chain tokens are excluded
-//      from the calibration set only — the board already excludes them as
-//      rows, so calibrating a DeFi launch curve from them inflated the
-//      backtest error; see CALIBRATION_EXCLUDED_CATEGORIES).
+//   2. OLS log-log fit log(mcap) = a + b*log(tvl) on those 128 comps.
 //      Slope < 1: smaller protocols command higher multiples (the size curve).
 //   3. Per-category relative factor: the category's median mcap/TVL, shrunk
 //      toward the global median (prior weight 4) and expressed relative to it,
-//      clamped to [0.15, 2.0]. Categories with fewer than 2 live comps get
-//      factor 1.0 (no comps -> global). Vault curators / capital allocators
-//      get a flat 0.5x: their TVL is nested inside underlying protocols, so a
-//      token would capture a fee slice, not the full TVL. The factor is
-//      applied at half strength (factor^0.5); the curator 0.5x is NOT damped.
+//      clamped to [0.15, 2.0]. Categories with fewer than 2 live comps use
+//      their family's pooled median instead (same shrinkage, same clamp) —
+//      the family table lives in lib/verify.ts. Categories in no family
+//      still fall back to factor 1.0 (no comps -> global). Vault curators /
+//      capital allocators get a flat 0.5x: their TVL is nested inside
+//      underlying protocols, so a token would capture a fee slice, not the
+//      full TVL. The factor is applied at half strength (factor^0.5); the
+//      curator 0.5x is NOT damped.
 //   4. implied = TVL x sizeCurve(TVL) x categoryFactor^0.5 x growth x maturity
 //      x stageDiscount(0.6) x 0.10 if the row carries a baked verification
 //      concern (8 slugs in lib/verify.ts), where growth = 1 + 0.5*clamp(change_7d,-60,120)/100
@@ -40,33 +39,19 @@ import {
   concernFor,
   CURATOR_CATEGORIES,
   exclusionReason,
+  FAMILIES,
+  FAMILY_OF,
   isPreToken,
   isVerified,
   REASON_LABELS,
   type ExclusionReason,
 } from './verify.ts';
 
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 export const STAGE_DISCOUNT = 0.6;
 export const UNKNOWN_AGE_DAYS = 365;
 export const MATURITY_DAYS = 1095;
 export const LIVE_ROWS = 24;
-
-/** F1 calibration filter — categories excluded from the CALIBRATION set
- *  only, never from the board. The board's own exclusion rules already say
- *  a CEX balance, a bridge / wrapped asset or a chain is not a token
- *  launch, so fitting the DeFi launch curve from their tokens is
- *  inconsistent: it inflated the leave-one-out error (MAPE 652.7% ->
- *  469.2% on all 128 comps when the filter is applied). The 28 excluded
- *  comps are still EVALUATED in the headline LOO (all 128), so the
- *  improvement is not bought by shrinking the test set. */
-export const CALIBRATION_EXCLUDED_CATEGORIES = new Set([
-  'CEX',
-  'Cross Chain Bridge',
-  'Canonical Bridge',
-  'Bridge',
-  'Chain',
-]);
 
 /** One protocol entry, exactly the ten fields the sealed input carries.
  *  listed_at is normalised to epoch seconds (UTC midnight) or null, so age is
@@ -126,38 +111,21 @@ export interface RadarRow {
   /** Damped category factor actually applied (0.5 for curator categories,
    *  otherwise the raw factor ^0.5). Excludes the concern haircut. */
   factor_used: number;
+  /** Where the raw factor came from: the row's own category, its family,
+   *  the global 1.0 fallback, or the curator 0.5x. */
+  factor_source: 'category' | 'family' | 'global' | 'curator';
+  /** The family the factor came from, when factor_source is 'family'. */
+  family: string | null;
+  /** Live comps behind the multiple actually used (family comps when the
+   *  factor came from a family, else the category's own comps). */
+  evidence_count: number;
   farm_steps: string[];
   farm: {
     capital_usd: number;
     duration: string;
     points: 'known' | 'none' | 'inferred';
     airdrop_range: [number, number];
-    /**
-     * Netting at the band's low end (5% community share, $25 gas), computed
-     * in lib/farm.ts from the row's own fields — no payout is invented:
-     * pool_net_low_usd = round(implied_low x 0.05) - 25 is the TOTAL pool
-     * slice minus gas (not a per-user payout); net_per_user_low_usd =
-     * implied_low x 0.05 x (capital/TVL) - 25 under a stated pro-rata
-     * share assumption (negative on every row at plan capital — the plan
-     * says so); breakeven_capital_usd is the capital at which the
-     * pro-rata slice covers the $25 gas.
-     */
-    pool_net_low_usd: number;
-    net_per_user_low_usd: number;
-    breakeven_capital_usd: number;
   };
-  /**
-   * Farm verdict, derived from fields the model already computes.
-   * SKIP when the row carries a baked verification concern (its value is
-   * governance-option value only after the 0.10x haircut, so a fresh-launch
-   * farm is not the base case); THIN when confidence is low (the multiple
-   * is a guess) or the row is a curator/allocator (0.5x structural
-   * discount — a fee slice, not the full TVL); FARM otherwise. The verdict
-   * is NOT decided by the netting numbers above — the pro-rata net is
-   * negative on every row at plan capital, so a net-based verdict would
-   * erase every FARM. Netting is the evidence, not the decider.
-   */
-  farm_verdict: 'FARM' | 'THIN' | 'SKIP';
   risks: string[];
 }
 
@@ -169,31 +137,28 @@ export interface RadarData {
     formula: string;
     loglog: { a: number; b: number };
     categoryMultiples: { [cat: string]: number };
+    /** The raw factor actually used per category (family factor where the
+     *  category has < 2 comps and belongs to a family, else the category
+     *  factor, 0.5 for curators, 1.0 for the global fallback). */
+    effectiveMultiples: { [cat: string]: number };
+    /** Where each category's factor came from. */
+    factorSources: { [cat: string]: 'category' | 'family' | 'global' | 'curator' };
+    /** Family name -> {raw factor, pooled comp count, member categories}. */
+    familyMultiples: {
+      [fam: string]: { factor: number; comps: number; categories: string[] };
+    };
     stageDiscount: number;
-    /** Headline LOO: evaluated on ALL 128 parent-aggregated live comps,
-     *  while each fold's fit uses the F1 calibration set (100 DeFi comps)
-     *  only. `robust` is the same evaluation restricted to held-out comps
-     *  with mcap >= $1M (near-dead tokens excluded from that view only). */
     loo: {
       n: number;
       mape: number;
       medianAbsLogErr: number;
-      within2x: number;
-      within3x: number;
-      robust: { n: number; mape: number; medianAbsLogErr: number; within2x: number };
+      within2: number;
+      within3: number;
     };
-    /** LOO evaluated on the 100 calibration (DeFi) comps themselves, with
-     *  the same robust view (held-out comps with mcap >= $1M). */
-    looCal: {
-      n: number;
-      mape: number;
-      medianAbsLogErr: number;
-      within2x: number;
-      within3x: number;
-      robust: { n: number; mape: number; medianAbsLogErr: number; within2x: number };
-    };
-    /** How many parent-aggregated live comps the curve was fitted on (F1: 100). */
-    calibrationN: number;
+    /** The robust view of the same LOO: only held-out comps with mcap
+     *  >= $1M scored (the near-dead tokens excluded from evaluation,
+     *  not from the fit). */
+    looRobust: { n: number; mape: number; medianAbsLogErr: number };
     comps: RadarComp[];
     /** All 128 parent-aggregated live comps as [tvl, mcap, category] triples,
      *  sorted by tvl ascending — the calibration-chart scatter population. */
@@ -366,6 +331,71 @@ function categoryFactor(
 }
 
 /**
+ * Family factor: the same computation as categoryFactor, over the pooled
+ * comps of a whole family (lib/verify.ts FAMILIES). The held-out comp is
+ * excluded by the caller passing the LOO-rest comp set, exactly as for
+ * the category factor.
+ */
+function familyFactor(
+  family: string,
+  comps: AggComp[],
+  globalMedian: number,
+): number {
+  const cats = FAMILIES[family] ?? [];
+  const inc = comps.filter((c) => cats.includes(c.category));
+  if (inc.length < 2) return 1;
+  const med = median(inc.map((c) => c.mcap / c.tvl));
+  const shrunk = (inc.length * med + 4 * globalMedian) / (inc.length + 4);
+  return clamp(shrunk / globalMedian, 0.15, 2);
+}
+
+export type FactorSource = 'category' | 'family' | 'global' | 'curator';
+
+/**
+ * The raw factor actually used for a category: the curator 0.5x (never
+ * replaced — structural nesting discount); the category factor when the
+ * category has >= 2 live comps; the family factor when it has fewer
+ * and belongs to a family; the global 1.0 otherwise.
+ */
+function effectiveFactor(
+  category: string,
+  comps: AggComp[],
+  globalMedian: number,
+): { factor: number; source: FactorSource; family: string | null } {
+  if (CURATOR_CATEGORIES.has(category)) {
+    return { factor: 0.5, source: 'curator', family: null };
+  }
+  const inCat = comps.filter((c) => c.category === category).length;
+  if (inCat >= 2) {
+    return {
+      factor: categoryFactor(category, comps, globalMedian),
+      source: 'category',
+      family: null,
+    };
+  }
+  const fam = FAMILY_OF[category];
+  if (fam !== undefined) {
+    return { factor: familyFactor(fam, comps, globalMedian), source: 'family', family: fam };
+  }
+  return { factor: 1, source: 'global', family: null };
+}
+
+/**
+ * Live comps behind the multiple actually used: the family pool when the
+ * factor came from a family (curators included — the 0.5x is structural,
+ * but the confidence reflects the family's evidence), else the category's
+ * own comps.
+ */
+function evidenceCount(category: string, comps: AggComp[]): number {
+  const fam = FAMILY_OF[category];
+  const inCat = comps.filter((c) => c.category === category).length;
+  if (fam !== undefined && (CURATOR_CATEGORIES.has(category) || inCat < 2)) {
+    return comps.filter((c) => (FAMILIES[fam] ?? []).includes(c.category)).length;
+  }
+  return inCat;
+}
+
+/**
  * radar-3: the category factor at half strength in log space (raw^0.5).
  * The curator 0.5x is NOT damped — it is a structural nesting discount
  * (TVL counted twice), not a fitted factor — so it stays exactly 0.5.
@@ -393,96 +423,105 @@ export function buildRadar(snapshot: Snapshot): {
 
   // --- calibration from the snapshot's own live-token protocols ---
   const liveAgg = aggregateLive(snapshot.protocols);
-  // F1: the curve is fitted on the DeFi comps only. CEX/bridge/chain
-  // tokens are excluded from the calibration set (never from the board —
-  // the board already excludes them as rows, and the headline LOO below
-  // still evaluates on all 128 comps, so nothing is hidden).
-  const calAgg = liveAgg.filter(
-    (c) => !CALIBRATION_EXCLUDED_CATEGORIES.has(c.category),
-  );
-  const loglog = logLogFit(calAgg);
-  const globalMedian = median(calAgg.map((c) => c.mcap / c.tvl));
+  const loglog = logLogFit(liveAgg);
+  const globalMedian = median(liveAgg.map((c) => c.mcap / c.tvl));
   const categories = [...new Set(snapshot.protocols.map((p) => p.category))].sort();
   const categoryMultiples: { [cat: string]: number } = {};
+  const effectiveMultiples: { [cat: string]: number } = {};
+  const factorSources: { [cat: string]: FactorSource } = {};
   for (const cat of categories) {
-    categoryMultiples[cat] = categoryFactor(cat, calAgg, globalMedian);
+    const eff = effectiveFactor(cat, liveAgg, globalMedian);
+    categoryMultiples[cat] = eff.factor;
+    effectiveMultiples[cat] = eff.factor;
+    factorSources[cat] = eff.source;
+  }
+  const familyMultiples: {
+    [fam: string]: { factor: number; comps: number; categories: string[] };
+  } = {};
+  for (const [fam, cats] of Object.entries(FAMILIES)) {
+    familyMultiples[fam] = {
+      factor: familyFactor(fam, liveAgg, globalMedian),
+      comps: liveAgg.filter((c) => cats.includes(c.category)).length,
+      categories: [...cats].sort(),
+    };
   }
   const sizeMultiple = (tvl: number): number =>
     Math.exp(loglog.a) * tvl ** (loglog.b - 1);
 
   // --- leave-one-out backtest of the fitted model (size x category x 0.6) ---
-  // Each fold refits on the F1 calibration set only (the held-out comp is
-  // removed first). `loo` evaluates on all 128 comps (CEX/bridges included
-  // as held-out comps, so the filter cannot flatter the headline number);
-  // `looCal` evaluates on the 100 calibration comps themselves. Each has a
-  // robust view restricted to held-out comps with mcap >= $1M.
-  const looEval = (
-    evalSet: AggComp[],
-  ): {
+  // The held-out comp is excluded from its family median too: the LOO
+  // loop recomputes the effective factor on the rest set.
+  const looErrs: { ape: number; absLog: number; mcap: number }[] = [];
+  for (let i = 0; i < liveAgg.length; i++) {
+    const held = liveAgg[i]!;
+    const rest = liveAgg.filter((_, j) => j !== i);
+    const fit = logLogFit(rest);
+    const gm = median(rest.map((c) => c.mcap / c.tvl));
+    const f = dampedFactor(
+      effectiveFactor(held.category, rest, gm).factor,
+      held.category,
+    );
+    const pred =
+      held.tvl * Math.exp(fit.a) * held.tvl ** (fit.b - 1) * f * STAGE_DISCOUNT;
+    looErrs.push({
+      ape: Math.abs(pred - held.mcap) / held.mcap,
+      absLog: Math.abs(Math.log(pred) - Math.log(held.mcap)),
+      mcap: held.mcap,
+    });
+  }
+  const looMetrics = (errs: { ape: number; absLog: number }[]): {
     n: number;
     mape: number;
     medianAbsLogErr: number;
-    within2x: number;
-    within3x: number;
-    robust: { n: number; mape: number; medianAbsLogErr: number; within2x: number };
-  } => {
-    const errs: { ape: number; absLog: number; mcap: number }[] = [];
-    for (const held of evalSet) {
-      const rest = liveAgg
-        .filter((c) => c !== held)
-        .filter((c) => !CALIBRATION_EXCLUDED_CATEGORIES.has(c.category));
-      if (rest.length < 2) continue;
-      const fit = logLogFit(rest);
-      const gm = median(rest.map((c) => c.mcap / c.tvl));
-      const f = dampedFactor(categoryFactor(held.category, rest, gm), held.category);
-      const pred =
-        held.tvl * Math.exp(fit.a) * held.tvl ** (fit.b - 1) * f * STAGE_DISCOUNT;
-      errs.push({
-        ape: Math.abs(pred - held.mcap) / held.mcap,
-        absLog: Math.abs(Math.log(pred) - Math.log(held.mcap)),
-        mcap: held.mcap,
-      });
-    }
-    const summarise = (
-      es: { ape: number; absLog: number }[],
-    ): { n: number; mape: number; medianAbsLogErr: number; within2x: number } => ({
-      n: es.length,
-      mape:
-        es.length === 0 ? 0 : es.reduce((s, e) => s + e.ape, 0) / es.length,
-      medianAbsLogErr:
-        es.length === 0 ? 0 : median(es.map((e) => e.absLog)),
-      within2x:
-        es.length === 0
-          ? 0
-          : es.filter((e) => e.absLog <= Math.log(2)).length / es.length,
-    });
-    const all = summarise(errs);
-    const rob = summarise(errs.filter((e) => e.mcap >= 1_000_000));
-    return {
-      ...all,
-      within3x:
-        errs.length === 0
-          ? 0
-          : errs.filter((e) => e.absLog <= Math.log(3)).length / errs.length,
-      robust: rob,
-    };
+    within2: number;
+    within3: number;
+  } => ({
+    n: errs.length,
+    mape:
+      errs.length === 0 ? 0 : errs.reduce((s, e) => s + e.ape, 0) / errs.length,
+    medianAbsLogErr: median(errs.map((e) => e.absLog)),
+    within2:
+      errs.length === 0
+        ? 0
+        : errs.filter((e) => e.absLog <= Math.log(2)).length / errs.length,
+    within3:
+      errs.length === 0
+        ? 0
+        : errs.filter((e) => e.absLog <= Math.log(3)).length / errs.length,
+  });
+  const loo = looMetrics(looErrs);
+  const looRobustErrs = looErrs.filter((e) => e.mcap >= 1_000_000);
+  const looRobust = {
+    n: looRobustErrs.length,
+    mape:
+      looRobustErrs.length === 0
+        ? 0
+        : looRobustErrs.reduce((s, e) => s + e.ape, 0) / looRobustErrs.length,
+    medianAbsLogErr: median(looRobustErrs.map((e) => e.absLog)),
   };
-  const loo = looEval(liveAgg);
-  const looCal = looEval(calAgg);
   const band = clamp(Math.exp(loo.medianAbsLogErr), 1.5, 4);
 
   const score = (
     p: SnapshotProtocol,
-  ): { base: number; factor: number; age: number | null } => {
+  ): {
+    base: number;
+    factor: number;
+    age: number | null;
+    source: FactorSource;
+    family: string | null;
+  } => {
     const age = ageDays(p, asOfMs);
     const effAge = age ?? UNKNOWN_AGE_DAYS;
     const growth =
       1 + (0.5 * clamp(p.change_7d ?? 0, -60, 120)) / 100;
     const maturity = 0.6 + (Math.min(effAge, MATURITY_DAYS) / MATURITY_DAYS) * 0.4;
-    const factor = dampedFactor(categoryMultiples[p.category] ?? 1, p.category);
+    const eff = effectiveFactor(p.category, liveAgg, globalMedian);
+    const factor = dampedFactor(eff.factor, p.category);
     // TVL <= 0 would make the size curve blow up (tvl^(b-1) with b < 1);
     // such a row can never be a real launch candidate, so floor it at $1.
-    if (!(p.tvl_usd > 0)) return { base: 1, factor, age };
+    if (!(p.tvl_usd > 0)) {
+      return { base: 1, factor, age, source: eff.source, family: eff.family };
+    }
     // Concern haircut x0.10: a row carrying a baked verification concern
     // (parent token already trades / stablecoin product / ...) has a base
     // case of no new token, so the value shown is governance-option value
@@ -501,7 +540,7 @@ export function buildRadar(snapshot: Snapshot): {
           concernHaircut,
       ),
     );
-    return { base, factor, age };
+    return { base, factor, age, source: eff.source, family: eff.family };
   };
 
   // --- board assembly: watchlist (always) + rankable below-floor pre-token ---
@@ -512,11 +551,13 @@ export function buildRadar(snapshot: Snapshot): {
     base: number;
     factor: number;
     age: number | null;
+    source: FactorSource;
+    family: string | null;
   }[] = [];
   for (const p of snapshot.protocols) {
     if (watchlist.has(p.slug)) {
-      const { base, factor, age } = score(p);
-      scored.push({ p, base, factor, age });
+      const { base, factor, age, source, family } = score(p);
+      scored.push({ p, base, factor, age, source, family });
       continue;
     }
     if (!isPreToken(p)) continue;
@@ -532,8 +573,8 @@ export function buildRadar(snapshot: Snapshot): {
       continue;
     }
     if (p.tvl_usd <= 0) continue;
-    const { base, factor, age } = score(p);
-    scored.push({ p, base, factor, age });
+    const { base, factor, age, source, family } = score(p);
+    scored.push({ p, base, factor, age, source, family });
   }
   // Deterministic order: implied desc, TVL desc, slug asc (breaks the rare tie).
   scored.sort(
@@ -543,7 +584,7 @@ export function buildRadar(snapshot: Snapshot): {
       (x.p.slug < y.p.slug ? -1 : 1),
   );
 
-  const rows: RadarRow[] = scored.map(({ p, base, factor, age }, i) => {
+  const rows: RadarRow[] = scored.map(({ p, base, factor, age, source, family }, i) => {
     const plan = farmPlanFor({
       slug: p.slug,
       name: p.name,
@@ -552,10 +593,11 @@ export function buildRadar(snapshot: Snapshot): {
       tvl_usd: p.tvl_usd,
       age_days: age,
       implied_base: base,
-      implied_low: Math.max(1, Math.round(base / band)),
+      top30: i < 30,
     });
     const verified = isVerified(p.slug, p.category);
     const liveInCat = liveAgg.filter((c) => c.category === p.category).length;
+    const evidence = evidenceCount(p.category, liveAgg);
     const risks: string[] = [];
     if (age === null) {
       risks.push(
@@ -567,7 +609,11 @@ export function buildRadar(snapshot: Snapshot): {
         'change_7d is missing in the snapshot — the growth factor is neutral (1.0).',
       );
     }
-    if (liveInCat < 2) {
+    if (source === 'family') {
+      risks.push(
+        `Only ${liveInCat} live-token comp${liveInCat === 1 ? '' : 's'} in ${p.category} itself — the multiple comes from the ${family} family (${evidence} pooled comps), so confidence reflects family evidence, not category evidence.`,
+      );
+    } else if (liveInCat < 2) {
       risks.push(
         `Fewer than 2 live-token comps in ${p.category} — the category multiple falls back to the global median, so confidence is low.`,
       );
@@ -585,9 +631,9 @@ export function buildRadar(snapshot: Snapshot): {
       );
     }
     let confidence: 'high' | 'medium' | 'low';
-    if (liveInCat >= 5 && age !== null && p.change_7d !== null) {
+    if (evidence >= 5 && age !== null && p.change_7d !== null) {
       confidence = 'high';
-    } else if (liveInCat >= 2 && (age !== null || p.change_7d !== null)) {
+    } else if (evidence >= 2 && (age !== null || p.change_7d !== null)) {
       confidence = 'medium';
     } else {
       confidence = 'low';
@@ -596,11 +642,6 @@ export function buildRadar(snapshot: Snapshot): {
     if (CURATOR_CATEGORIES.has(p.category) && confidence === 'high') {
       confidence = 'medium';
     }
-    const farm_verdict: 'FARM' | 'THIN' | 'SKIP' = !verified
-      ? 'SKIP'
-      : confidence === 'low' || CURATOR_CATEGORIES.has(p.category)
-        ? 'THIN'
-        : 'FARM';
     return {
       slug: p.slug,
       name: p.name,
@@ -618,17 +659,16 @@ export function buildRadar(snapshot: Snapshot): {
       verified,
       multiple_used: base / p.tvl_usd,
       factor_used: factor,
+      factor_source: source,
+      family,
+      evidence_count: evidence,
       farm_steps: plan.steps,
       farm: {
         capital_usd: plan.capital_usd,
         duration: plan.duration,
         points: plan.points,
         airdrop_range: [plan.airdrop_low, plan.airdrop_high],
-        pool_net_low_usd: plan.pool_net_low_usd,
-        net_per_user_low_usd: plan.net_per_user_low_usd,
-        breakeven_capital_usd: plan.breakeven_capital_usd,
       },
-      farm_verdict,
       risks,
     };
   });
@@ -649,10 +689,9 @@ export function buildRadar(snapshot: Snapshot): {
     }))
     .sort((a, b) => b.count - a.count);
 
-  // Calibration-chart population: the 100 F1 calibration comps as
-  // [tvl, mcap, category] triples, sorted by tvl ascending — the set the
-  // curve was fitted on.
-  const fitPoints: [number, number, string][] = [...calAgg]
+  // Calibration-chart population: all 128 parent-aggregated live comps as
+  // [tvl, mcap, category] triples, sorted by tvl ascending.
+  const fitPoints: [number, number, string][] = [...liveAgg]
     .sort((a, b) => a.tvl - b.tvl || (a.symbol < b.symbol ? -1 : 1))
     .map((c) => [c.tvl, c.mcap, c.category]);
 
@@ -721,12 +760,10 @@ export function buildRadar(snapshot: Snapshot): {
     `(1 + 0.5 x clamp(change_7d,-60,120)/100) x (0.6 + min(age,1095)/1095 x 0.4) x 0.6 x 0.10 if baked verification concern; ` +
     `log(mcap) = ${loglog.a.toFixed(4)} + ${loglog.b.toFixed(
       4,
-    )} x log(tvl) fitted on ${calAgg.length} parent-aggregated DeFi comps ` +
-    `(CEX, bridge and chain tokens excluded from calibration — the board ` +
-    `excludes them as rows too); ` +
+    )} x log(tvl) fitted on ${liveAgg.length} parent-aggregated live-token comps; ` +
     `categoryFactor = shrunk category median mcap/TVL / global median ${globalMedian.toFixed(
       4,
-    )}, clamped [0.15, 2.0], <2 comps -> 1.0, curators -> 0.5; ` +
+    )}, clamped [0.15, 2.0], prior weight 4; categories with fewer than 2 live comps use their family's pooled median instead (same shrinkage and clamp) — Vaults & allocators, Money markets, Perps & derivatives, Staking — and categories in no family fall back to 1.0; curators -> 0.5; ` +
     `the category factor is applied at half strength (factor^0.5) for every non-curator category, while the curator 0.5x is a structural nesting discount and stays undamped; ` +
     `rows carrying a baked verification concern (8 slugs: parent token already trades, stablecoin product, chain, or no launch mechanism visible) get an additional x0.10 haircut after the stage discount, so the value shown is governance-option value only; ` +
     `low/bull = base / x${band.toFixed(2)} (LOO median abs log error ${loo.medianAbsLogErr.toFixed(
@@ -741,10 +778,12 @@ export function buildRadar(snapshot: Snapshot): {
       formula,
       loglog: { a: loglog.a, b: loglog.b },
       categoryMultiples,
+      effectiveMultiples,
+      factorSources,
+      familyMultiples,
       stageDiscount: STAGE_DISCOUNT,
       loo,
-      looCal,
-      calibrationN: calAgg.length,
+      looRobust,
       comps,
       fitPoints,
     },

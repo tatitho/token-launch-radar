@@ -50,13 +50,20 @@ if (issue !== null) {
   process.exit(1);
 }
 
-// --- v2 farm-step build-time assertion (spec §4.2): every step carries a
-// cost and/or a duration token; no step exceeds 550 chars. ---
+// --- v3 farm-step build-time assertion (spec §4.2/L3): the top-30 rows
+// carry 7 steps each (sizing + exit trigger); every step carries a cost
+// and/or a duration token; no step exceeds 550 chars. ---
 const COST_RE = /\$|budget|gas|fee|APY/i;
 const DURATION_RE = /(\d+\s*[–-]\s*\d+|\d+)\s*(day|week|month)s?\b|weekly|daily|for the (first|full) (week|window)/i;
 let farmSteps = 0;
 let farmBoth = 0;
 for (const row of board) {
+  if (row.rank <= 30 && row.farm_steps.length !== 7) {
+    process.stderr.write(
+      `token radar: top-30 row ${row.slug} has ${row.farm_steps.length} farm steps, expected 7\n`,
+    );
+    process.exit(1);
+  }
   for (const s of row.farm_steps) {
     farmSteps++;
     const hasCost = COST_RE.test(s);
@@ -136,24 +143,9 @@ const dossierTextBytes = Buffer.byteLength(
   'utf8',
 );
 
-// --- netting summary (printed for the record; the same numbers live per
-// row in data.js). Pool net is the total low-end slice minus $25 gas;
-// per-user net assumes a pro-rata share of that slice. ---
-const netPerUser = radar.rows
-  .map((r) => r.farm.net_per_user_low_usd)
-  .sort((a, b) => a - b);
-const medianNetPerUser =
-  netPerUser.length === 0
-    ? 0
-    : netPerUser[Math.floor(netPerUser.length / 2)]!;
-const positiveNet = netPerUser.filter((n) => n > 0).length;
-
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored\n` +
-    `token radar: LOO n=${radar.model.loo.n} MAPE ${(radar.model.loo.mape * 100).toFixed(1)}% median|log| ${radar.model.loo.medianAbsLogErr.toFixed(3)} within 2x ${(radar.model.loo.within2x * 100).toFixed(1)}%\n` +
-    `token radar: LOO calibration set n=${radar.model.looCal.n} MAPE ${(radar.model.looCal.mape * 100).toFixed(1)}% median|log| ${radar.model.looCal.medianAbsLogErr.toFixed(3)} within 2x ${(radar.model.looCal.within2x * 100).toFixed(1)}% robust mcap>=$1M MAPE ${(radar.model.looCal.robust.mape * 100).toFixed(1)}% median|log| ${radar.model.looCal.robust.medianAbsLogErr.toFixed(3)}\n` +
-    `token radar: netting: pool net low-end top 10: ${radar.rows.slice(0, 10).map((r) => `${r.slug} $${r.farm.pool_net_low_usd.toLocaleString('en-US')}`).join(', ')}\n` +
-    `token radar: netting: median net per-user $${medianNetPerUser.toFixed(2)} (${positiveNet}/${radar.rows.length} rows positive at plan capital)\n` +
+    `token radar: LOO n=${radar.model.loo.n} MAPE ${(radar.model.loo.mape * 100).toFixed(1)}% median|log| ${radar.model.loo.medianAbsLogErr.toFixed(3)} within2x ${(radar.model.loo.within2 * 100).toFixed(1)}% within3x ${(radar.model.loo.within3 * 100).toFixed(1)}% | robust n=${radar.model.looRobust.n} MAPE ${(radar.model.looRobust.mape * 100).toFixed(1)}% median|log| ${radar.model.looRobust.medianAbsLogErr.toFixed(3)}\n` +
     `token radar: farm audit: ${farmSteps} steps, 100% with cost and/or duration, ${((farmBoth / farmSteps) * 100).toFixed(1)}% with both\n` +
     `token radar: top 10: ${board.slice(0, 10).map((r) => `${r.slug} $${r.implied_value_usd}`).join(', ')}\n` +
     `token radar: dossier text ${dossierTextBytes} bytes (cap ${TEXT_MAX_BYTES})\n` +

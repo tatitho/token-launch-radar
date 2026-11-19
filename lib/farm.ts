@@ -9,14 +9,7 @@
 // snapshot — farm by usage, not by chasing a program that may not exist".
 // The farmer-facing number is always a range: implied FDV x 5-25% community
 // share, with the disclaimer that points outstanding are unknown, so no
-// per-user value can be promised as a payout. The plan ALSO nets the low
-// end in dollars, from the row's own fields only: the total pool slice
-// (5% of the low-end implied FDV, minus $25 of gas) and the pro-rata
-// per-user net (pool slice x capital/TVL, minus $25 gas) — with the
-// assumption stated on the step itself. At plan capital the per-user net
-// is negative on every row; the plan says so, and the break-even capital
-// (the capital at which the pro-rata slice covers the gas) is stated
-// beside it, so no row ever promises a per-user profit.
+// per-user value can be computed honestly.
 //
 // v2 farm-step standard (§4.2): every step is 150–450 chars and carries at
 // least one of (C) cost ($ / budget / gas / fee / APY) or (D) duration
@@ -37,9 +30,8 @@ export interface RowFacts {
   tvl_usd: number;
   age_days: number | null;
   implied_base: number;
-  /** Low-end implied FDV (base / band, from lib/model.ts) — the netting
-   *  steps and fields are computed from this, never from a second fit. */
-  implied_low: number;
+  /** True for the board's top 30 rows: those plans carry 7 steps. */
+  top30: boolean;
 }
 
 export interface FarmPlan {
@@ -49,11 +41,6 @@ export interface FarmPlan {
   points: PointsStatus;
   airdrop_low: number;
   airdrop_high: number;
-  /** Netting at the band's low end (see nettingFor): total pool slice minus
-   *  $25 gas; pro-rata per-user net; break-even capital. */
-  pool_net_low_usd: number;
-  net_per_user_low_usd: number;
-  breakeven_capital_usd: number;
 }
 
 /** Categories where points-style farming is the established norm, so a
@@ -627,93 +614,23 @@ const OVERRIDES: Record<string, (f: RowFacts) => string[]> = {
   },
 };
 
-/** Exact dollars with thousands separators, for netting figures (money()
- *  above rounds to $k/$M, which would hide the netting arithmetic). */
-function moneyFull(n: number): string {
-  return `$${Math.round(n).toLocaleString('en-US')}`;
-}
-
-/** Signed dollars with cents, for the (negative) per-user net. */
-function moneySigned(n: number): string {
-  return n < 0
-    ? `-$${Math.abs(n).toFixed(2)}`
-    : `$${n.toFixed(2)}`;
-}
-
-/** Netting constants: the low-end community share and the gas budget the
- *  netting step nets against (the $25 high end of the step-1 budget). */
-export const NET_GAS_USD = 25;
-export const NET_SHARE_LOW = 0.05;
-
-export interface Netting {
-  poolNetLowUsd: number;
-  netPerUserLowUsd: number;
-  breakevenCapitalUsd: number;
-}
-
-/**
- * Netting at the band's low end, from the row's own fields only.
- * Pool slice = 5% of the low-end implied FDV (the low end of the 5–25%
- * community share the plan already states); gas is the $25 high end of
- * the step-1 budget. Pool net is the TOTAL community slice minus gas —
- * not a per-user payout. Per-user net assumes a pro-rata share
- * (capital/TVL) and is negative on every row at plan capital; the
- * break-even capital is the capital at which the pro-rata slice covers
- * the $25 gas. Rows with no TVL or no low-end value get a $0 pool net
- * and a -$25 per-user net rather than a division by zero.
- */
-export function nettingFor(f: RowFacts): Netting {
-  const sliceLow = f.implied_low * NET_SHARE_LOW;
-  const poolNetLowUsd =
-    f.tvl_usd > 0 && sliceLow > 0 ? Math.round(sliceLow) - NET_GAS_USD : 0;
-  const netPerUserLowUsd =
-    f.tvl_usd > 0 && sliceLow > 0
-      ? Math.round(
-          (sliceLow * (capitalFor(f.tvl_usd) / f.tvl_usd) - NET_GAS_USD) * 100,
-        ) / 100
-      : -NET_GAS_USD;
-  const breakevenCapitalUsd =
-    f.tvl_usd > 0 && sliceLow > 0
-      ? Math.round((NET_GAS_USD * f.tvl_usd) / sliceLow)
-      : 0;
-  return { poolNetLowUsd, netPerUserLowUsd, breakevenCapitalUsd };
-}
-
-/** The netting step, appended to every plan: states the low-end pool net
- *  and the pro-rata per-user net in dollars, with the $25 gas cost and the
- *  holding window, so it passes the build-time cost/duration assertion. */
-function nettingStep(f: RowFacts, n: Netting): string {
-  const cap = money(capitalFor(f.tvl_usd));
-  const dur = durationFor(f.age_days);
-  return `Net the plan at the band's low end before sizing it: a 5% community share of the ${moneyFull(
-    f.implied_low,
-  )} low-end value is ${moneyFull(
-    f.implied_low * NET_SHARE_LOW,
-  )}, so after $${NET_GAS_USD} of gas the total pool slice is ${moneyFull(
-    n.poolNetLowUsd,
-  )} — and on a ${cap} position your pro-rata share of that pool is about ${moneySigned(
-    n.netPerUserLowUsd,
-  )} per user, so at this capital the farm pays only if points weight you above pro-rata; run these numbers over the full ${dur} window before adding capital.`;
-}
-
-/** The break-even / exit step, appended to every plan: states the capital
- *  at which the pro-rata slice covers the gas, with the plan's own capital
- *  and the holding window. */
-function breakevenStep(f: RowFacts, n: Netting): string {
-  const cap = money(capitalFor(f.tvl_usd));
-  const dur = durationFor(f.age_days);
-  return `Size the exit by the break-even: at the low end you would need about ${moneyFull(
-    n.breakevenCapitalUsd,
-  )} of capital for a pro-rata slice to cover the $${NET_GAS_USD} gas — far above this plan's ${cap} — so treat the position as an option on a token launch, not as a paying farm, and exit inside the ${dur} window after a token announcement or when the position's costs exceed its option value.`;
-}
-
 /** Full farm plan for one board row. Overrides win where curated; everything
  *  else is templated from the row's own facts. */
 export function farmPlanFor(f: RowFacts): FarmPlan {
   const override = OVERRIDES[f.slug];
-  const steps = override !== undefined ? override(f) : templateSteps(f);
-  const net = nettingFor(f);
-  steps.push(nettingStep(f, net), breakevenStep(f, net));
+  let steps = override !== undefined ? override(f) : templateSteps(f);
+  if (f.top30) {
+    // v3 (radar-4): the top-30 plans carry 7 steps. Template rows get the
+    // sizing step plus a row-specific exit trigger (replacing the generic
+    // exit); override rows keep their 5 protocol-specific steps and gain
+    // the sizing step plus a monitor step that names the one metric to
+    // watch. Every added step carries the row's own capital and window.
+    if (override !== undefined) {
+      steps = [...steps, sizingStep(f), monitorStep(f)];
+    } else {
+      steps = [...steps.slice(0, 5), sizingStep(f), exitTriggerStep(f)];
+    }
+  }
   const low = Math.max(1, Math.round(f.implied_base * 0.05));
   const high = Math.max(low, Math.round(f.implied_base * 0.25));
   return {
@@ -723,10 +640,155 @@ export function farmPlanFor(f: RowFacts): FarmPlan {
     points: pointsStatus(f.category),
     airdrop_low: low,
     airdrop_high: high,
-    pool_net_low_usd: net.poolNetLowUsd,
-    net_per_user_low_usd: net.netPerUserLowUsd,
-    breakeven_capital_usd: net.breakevenCapitalUsd,
   };
+}
+
+/** "2,222x" — manual thousands separators, no locale dependence. */
+function multFmt(n: number): string {
+  const s = String(Math.round(n));
+  return `${s.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}×`;
+}
+
+/**
+ * Step 6 (top 30): the EV-per-dollar sizing line, rendered as a number.
+ * The airdrop range is the whole protocol-level pie (implied FDV x
+ * 5-25% community share), so the multiple is stated as the pie versus
+ * one ticket — never as a per-user return, which the snapshot cannot
+ * support (points outstanding are unknown).
+ */
+function sizingStep(f: RowFacts): string {
+  const cap = money(capitalFor(f.tvl_usd));
+  const dur = durationFor(f.age_days);
+  const capUsd = capitalFor(f.tvl_usd);
+  const low = Math.max(1, Math.round(f.implied_base * 0.05));
+  const high = Math.max(low, Math.round(f.implied_base * 0.25));
+  return `Sizing: the protocol-level airdrop range is ${money(low)}–${money(high)} at a 5–25% community share of the ${money(f.implied_base)} implied FDV — that is ${multFmt(low / capUsd)}–${multFmt(high / capUsd)} a ${cap} ticket, the whole pie, not your share; size the ticket so gas ($10–25) stays under ~5% of it, and hold for the full ${dur} window.`;
+}
+
+interface RowTrigger {
+  /** "when ..." — the condition that triggers the exit. */
+  exit: string;
+  /** What to check, e.g. "the vault's net APY against the underlying market". */
+  watch: string;
+  /** How often to check it. */
+  cadence: string;
+  /** What unwinding costs. */
+  gas: string;
+}
+
+/** The named exit trigger per category family, built from the row's own
+ *  mechanics — the same trigger the monitor step watches for. */
+function triggerFor(category: string): RowTrigger {
+  switch (category) {
+    case 'Risk Curators':
+    case 'Onchain Capital Allocator':
+      return {
+        exit: 'when the curator fee exceeds the underlying yield for two weeks running',
+        watch: "the vault's net APY against the underlying market",
+        cadence: 'weekly',
+        gas: '$10–25',
+      };
+    case 'Derivatives':
+    case 'Basis Trading':
+      return {
+        exit: 'when funding stays negative for a week',
+        watch: 'the funding rate',
+        cadence: 'daily for the first week, then weekly',
+        gas: '$10–25',
+      };
+    case 'Lending':
+    case 'Uncollateralized Lending':
+      return {
+        exit: 'when borrow APY exceeds supply APY for two weeks',
+        watch: 'utilisation and borrow rates',
+        cadence: 'weekly',
+        gas: '$10–20',
+      };
+    case 'Dexs':
+      return {
+        exit: 'when the pool’s fee APR trails the same capital in a plain lending market for two weeks',
+        watch: 'the pool’s fee APR against a lending benchmark',
+        cadence: 'weekly',
+        gas: '$10–20',
+      };
+    case 'Liquid Staking':
+    case 'Liquid Restaking':
+    case 'Restaking':
+    case 'Staking Pool':
+      return {
+        exit: 'when the receipt token trades below peg by more than 0.5% for a week',
+        watch: 'the receipt token’s peg',
+        cadence: 'weekly',
+        gas: '$5–15',
+      };
+    case 'RWA':
+      return {
+        exit: 'when the vault’s yield trails a plain T-bill rate for a full month',
+        watch: 'the vault’s net yield against a T-bill rate',
+        cadence: 'weekly',
+        gas: '$10–20',
+      };
+    case 'Yield':
+    case 'Yield Aggregator':
+      return {
+        exit: 'when the vault’s net APY trails the same strategy run directly for 30 days',
+        watch: 'the vault’s net APY against the strategy run directly',
+        cadence: 'weekly',
+        gas: '$10–20',
+      };
+    case 'CDP':
+    case 'CDP Manager':
+      return {
+        exit: 'when the collateral ratio drifts under 150% and cannot be topped up',
+        watch: 'the collateral ratio',
+        cadence: 'weekly',
+        gas: '$10–20',
+      };
+    case 'Prediction Market':
+      return {
+        exit: 'when your open outcome shares stop resolving in your favour for two weeks',
+        watch: 'resolved volume on your open markets',
+        cadence: 'weekly',
+        gas: '$5–15',
+      };
+    case 'Chain':
+    case 'Payments':
+      return {
+        exit: 'when weekly activity costs more in fees than the position’s option value',
+        watch: 'weekly gas and bridge fees against the position’s option value',
+        cadence: 'weekly',
+        gas: '$10–30',
+      };
+    default:
+      return {
+        exit: 'when the position’s implied value per dollar falls below your entry cost',
+        watch: 'the row’s implied value and any token announcement',
+        cadence: 'weekly',
+        gas: '$5–15',
+      };
+  }
+}
+
+/** Step 7 (top-30 template rows): the exit, with a named row-specific trigger. */
+function exitTriggerStep(f: RowFacts): string {
+  const cap = money(capitalFor(f.tvl_usd));
+  const dur = durationFor(f.age_days);
+  const t = triggerFor(f.category);
+  return `Exit after a token announcement, or ${t.exit} — check ${t.watch} ${t.cadence} over the ${dur} window, and budget ${t.gas} in gas to close the ${cap} position.`;
+}
+
+/**
+ * Step 7 (top-30 override rows): the monitor step. The override's own
+ * step 5 already is the exit, so this step names the one metric that
+ * decides whether to exit early — a threshold, a check cadence and a
+ * 48-hour decision window — instead of repeating the exit.
+ */
+function monitorStep(f: RowFacts): string {
+  const cap = money(capitalFor(f.tvl_usd));
+  const dur = durationFor(f.age_days);
+  const t = triggerFor(f.category);
+  const when = t.exit.charAt(0).toUpperCase() + t.exit.slice(1);
+  return `Watch one number ${t.cadence}: ${t.watch}. ${when}, decide within 48 hours whether to exit early instead of waiting for a token announcement over the ${dur} window, and budget ${t.gas} in gas for the move on the ${cap} position.`;
 }
 
 /** Slugs with a curated (hand-written, protocol-specific) farm plan. */
