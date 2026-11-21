@@ -45,16 +45,13 @@
     return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + '×';
   }
   
-  function impliedValueFromComps(tvl, category, change7d, ageDays, concern) {
+  function impliedValueFromComps(tvl, category) {
     var m = D.model || {}, ll = m.loglog || {}, mults = m.effectiveMultiples || {};
     var a = num(ll.a), b = num(ll.b);
     if (a === null || b === null || !(tvl > 0)) return null;
     var raw = mults[category]; if (raw == null) raw = 1;
     var f = (category === 'Risk Curators' || category === 'Onchain Capital Allocator') ? 0.5 : Math.pow(raw, 0.5);
-    var age = ageDays == null ? 365 : ageDays;
-    var g = 1 + 0.5 * Math.max(-60, Math.min(120, change7d || 0)) / 100;
-    var v = tvl * Math.exp(a) * Math.pow(tvl, b - 1) * f * g * (0.6 + Math.min(age, 1095) / 1095 * 0.4) * 0.6;
-    if (concern) v *= 0.1;
+    var v = tvl * Math.exp(a) * Math.pow(tvl, b - 1) * f * 0.6;
     return Math.max(1, Math.round(v));
   }
   function pctCls(n) {
@@ -158,20 +155,43 @@
     if (!grid) return;
     grid.insertAdjacentHTML('beforebegin',
       '<div class="panel" style="padding:10px 16px;font-size:13.5px">' +
-      '<b>Model:</b> implied = TVL &times; size curve &times; category factor<sup>0.5</sup> &times; growth &times; maturity &times; 0.6 — ' +
-      'fitted on ' + (loo.n != null ? loo.n : 128) + ' live-token comps, LOO &times;' + x + ' &middot; walk-forward ' + w + ' &middot; P25–P75 holds ' + c + '</div>');
+      '<b>Model:</b> implied = TVL &times; size curve &times; category factor<sup>0.5</sup> &times; 0.6 — ' +
+      'fitted on ' + (loo.n != null ? loo.n : 128) + ' live-token comps, LOO &times;' + x + ' &middot; walk-forward ' + w + ' &middot; P25–P75 holds ' + c + ' &middot; LOO/WF are the shipped model</div>');
   }
 
 
-  var state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', wl: false, sort: 'rank', dir: 1 };
+  var state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', wl: false, sort: 'rank', dir: 1, dep: 10000 };
+  // Farm economics at the chosen deposit: the slice scales with the
+  // ticket, fees and hours are the plan's own (flat), T-bill is 4%
+  // annual on the ticket over the holding window. Same formula as the
+  // build-time net, computed at the plan's minimum ticket.
+  function windowYears(dur) {
+    var m = /(\d+)\s*[–-]\s*(\d+)\s+days/.exec(dur || '');
+    if (!m) return 45 / 365;
+    return (Number(m[1]) + Number(m[2])) / 2 / 365;
+  }
+  function netAt(r) {
+    var n = r.net || {};
+    var fees = num(n.fees) || 0, hours = num(n.hours) || 0;
+    var yrs = windowYears((r.farm || {}).duration);
+    var dep = state.dep;
+    var slice = (r.tvl_usd > 0) ? (num(r.implied_base) || 0) * 0.15 * (dep / r.tvl_usd) : 0;
+    var tbill = dep * 0.04 * yrs;
+    var net = slice - fees - tbill;
+    var rate = (r.tvl_usd > 0) ? (num(r.implied_base) || 0) * 0.15 / r.tvl_usd - 0.04 * yrs : -1;
+    return { slice: slice, fees: fees, tbill: tbill, hours: hours, net: net,
+      netPerHour: hours > 0 ? net / hours : 0,
+      breakEven: rate > 0 ? fees / rate : null,
+      verdict: net > 0 ? 'farm' : slice > fees ? 'marginal' : 'skip' };
+  }
   var SORTS = {
     rank: function (a, b) { return (num(a.rank) || 9999) - (num(b.rank) || 9999); },
     implied: function (a, b) { return (num(b.implied_base) || 0) - (num(a.implied_base) || 0); },
     tvl: function (a, b) { return (num(b.tvl_usd) || 0) - (num(a.tvl_usd) || 0); },
     age: function (a, b) { var x = num(a.age_days), y = num(b.age_days); if (x === null && y === null) return 0; if (x === null) return 1; if (y === null) return -1; return y - x; },
     chg: function (a, b) { var x = num(a.change_7d), y = num(b.change_7d); if (x === null && y === null) return 0; if (x === null) return 1; if (y === null) return -1; return y - x; },
-    net: function (a, b) { return (num(b.net && b.net.net) ?? -1e18) - (num(a.net && a.net.net) ?? -1e18); },
-    neth: function (a, b) { return (num(b.net && b.net.netPerHour) ?? -1e18) - (num(a.net && a.net.netPerHour) ?? -1e18); }
+    net: function (a, b) { return netAt(b).net - netAt(a).net; },
+    neth: function (a, b) { return netAt(b).netPerHour - netAt(a).netPerHour; }
   };
   function inBand(r) {
     var t = num(r.tvl_usd); if (t === null) return state.band === 'all';
@@ -205,7 +225,8 @@
     }
     for (var k = 0; k < list.length; k++) {
       var r = list[k];
-      var np = r.net && r.net.net > 0 ? 'pos' : 'neg';
+      var na = netAt(r);
+      var np = na.net > 0 ? 'pos' : 'neg';
       h += '<tr><td class="num">' + esc(r.rank) + '</td>' +
         '<td class="name">' + wlMark(r) + '<a href="' + rowLink(r) + '">' + esc(r.name) + '</a> ' + flagChip(r) +
         '<br><span class="mut" style="font-size:12px">' + esc(r.slug) + '</span></td>' +
@@ -217,12 +238,14 @@
         '<td class="num">' + fmtAge(r.age_days) + '</td>' +
         '<td><span class="num"><b>' + fmtUsd(r.implied_base) + '</b></span> <span class="mut num" style="font-size:12px">' + fmtUsd(r.implied_low) + ' – ' + fmtUsd(r.implied_bull) + '</span>' +
         '<span class="bar"><i style="width:' + Math.max(2, Math.round(100 * (num(r.implied_base) || 0) / maxBase)) + '%"></i></span></td>' +
-        '<td class="num ' + np + '">' + fmtSigned(r.net ? r.net.net : null) + '</td>' +
-        '<td class="num ' + np + '">' + fmtSignedH(r.net ? r.net.netPerHour : null) + '</td>' +
+        '<td class="num ' + np + '">' + fmtSigned(na.net) + '</td>' +
+        '<td class="num ' + np + '">' + fmtSignedH(na.netPerHour) + '</td>' +
         '<td>' + confBadge(r.confidence) + '</td></tr>';
     }
     document.getElementById('tbody').innerHTML = h;
-    document.getElementById('count').innerHTML = 'Showing <b>' + list.length + '</b> of <b>' + rows.length + '</b> protocols';
+    var vc = { farm: 0, marginal: 0, skip: 0 };
+    for (var vi = 0; vi < rows.length; vi++) vc[netAt(rows[vi]).verdict]++;
+    document.getElementById('count').innerHTML = 'Showing <b>' + list.length + '</b> of <b>' + rows.length + '</b> protocols &middot; at $' + state.dep.toLocaleString('en-US') + ': <b>' + vc.farm + '</b> farm / <b>' + vc.marginal + '</b> marginal / <b>' + vc.skip + '</b> skip';
     var ths = document.querySelectorAll('#boardtbl th[data-sort]');
     for (var j = 0; j < ths.length; j++) {
       ths[j].classList.toggle('sorted', ths[j].getAttribute('data-sort') === state.sort);
@@ -248,13 +271,14 @@
     document.getElementById('f-conf').addEventListener('change', function (e) { state.conf = e.target.value; renderBoard(); });
     document.getElementById('f-wl').addEventListener('change', function (e) { state.wl = e.target.checked; renderBoard(); });
     document.getElementById('f-sort').addEventListener('change', function (e) { state.sort = e.target.value; renderBoard(); });
+    document.getElementById('f-dep').addEventListener('change', function (e) { state.dep = Number(e.target.value) || 10000; renderBoard(); });
     document.getElementById('f-dir').addEventListener('click', function () { state.dir = -state.dir; renderBoard(); });
     document.getElementById('f-reset').addEventListener('click', function () {
-      state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', wl: false, sort: 'rank', dir: 1 };
+      state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', wl: false, sort: 'rank', dir: 1, dep: 10000 };
       document.getElementById('f-q').value = ''; document.getElementById('f-cat').value = 'all';
       document.getElementById('f-chain').value = 'all'; document.getElementById('f-band').value = 'all';
       document.getElementById('f-conf').value = 'all'; document.getElementById('f-wl').checked = false;
-      document.getElementById('f-sort').value = 'rank'; renderBoard();
+      document.getElementById('f-sort').value = 'rank'; document.getElementById('f-dep').value = '10000'; renderBoard();
     });
     var ths = document.querySelectorAll('#boardtbl th[data-sort]');
     for (var j = 0; j < ths.length; j++) {
@@ -285,7 +309,7 @@
       return;
     }
     var farm = r.farm || {};
-    var net = r.net || {};
+    var net = netAt(r);
     var steps = r.farm_steps || [];
     var risks = r.risks || [];
     var comps = (D.live || []).filter(function (c) { return c.category === r.category; })
@@ -302,12 +326,11 @@
           return '<tr><td>' + esc(c.name) + '</td><td class="r num">' + fmtUsd(c.tvl_usd) + '</td><td class="r num">' + fmtUsd(c.mcap_usd) + '</td><td class="r num">' + fmtMult(c.multiple) + '</td></tr>';
         }).join('') + '</tbody></table></div>'
       : '<p class="mut">No live-token comparable in this category was in the snapshot.</p>';
-    var airdrop = (farm.airdrop_range && farm.airdrop_range.length === 2)
-      ? fmtUsd(farm.airdrop_range[0]) + '–' + fmtUsd(farm.airdrop_range[1]) : 'n/a';
-    var evMult = 'n/a';
-    if (farm.airdrop_range && farm.airdrop_range.length === 2 && farm.capital_usd) {
-      evMult = fmtX(farm.airdrop_range[0] / farm.capital_usd) + '–' + fmtX(farm.airdrop_range[1] / farm.capital_usd);
-    }
+    var dep = state.dep;
+    var airLow = (num(r.implied_base) || 0) * 0.05;
+    var airHigh = (num(r.implied_base) || 0) * 0.25;
+    var airdrop = fmtUsd(airLow) + '–' + fmtUsd(airHigh);
+    var evMult = fmtX(airLow / dep) + '–' + fmtX(airHigh / dep);
     var pts = farm.points || 'unknown';
     box.innerHTML =
       '<div class="panel" style="padding:18px 20px"><div class="d-head"><div>' +
@@ -329,7 +352,7 @@
       '<div class="mid"><span>Base</span><b>' + fmtUsd(r.implied_base) + '</b></div>' +
       '<div><span>Bull</span><b>' + fmtUsd(r.implied_bull) + '</b></div></div>' +
       '<div class="d-cols"><div class="d-sec"><h3>Farm plan</h3>' + stepsHtml +
-      '<dl class="kv"><dt>Capital</dt><dd class="num">' + (farm.capital_usd != null ? fmtUsd(farm.capital_usd) : 'n/a') + '</dd>' +
+      '<dl class="kv"><dt>Deposit</dt><dd class="num">' + fmtUsd(dep) + ' <span class="mut" style="font-size:12px">plan minimum ' + (farm.capital_usd != null ? fmtUsd(farm.capital_usd) : 'n/a') + ' — change it in the board filters</span></dd>' +
       '<dt>Duration</dt><dd>' + esc(farm.duration || 'n/a') + '</dd>' +
       '<dt>Points program</dt><dd>' + esc(pts) + '</dd>' +
       '<dt>Implied airdrop slice</dt><dd class="num">' + esc(airdrop) + '</dd>' +
@@ -339,7 +362,7 @@
       '<p class="mut" style="font-size:12.5px">The airdrop slice is the implied FDV times the share a community allocation usually takes (5–25%). Points outstanding are unknown, so no per-user value is claimed.</p></div>' +
       '<div class="d-sec"><h3>Why this multiple</h3>' + compsHtml +
       (r.factor_used != null ? '<dl class="kv" style="margin:12px 0 0"><dt>Category factor (damped)</dt><dd class="num">' + fmtMult(r.factor_used) + '</dd>' +
-      '<dt>Recomputed from comps</dt><dd class="num">' + fmtUsd(impliedValueFromComps(r.tvl_usd, r.category, r.change_7d, r.age_days, !r.verified)) + '</dd></dl>' : '') +
+      '<dt>Recomputed from comps</dt><dd class="num">' + fmtUsd(impliedValueFromComps(r.tvl_usd, r.category)) + '</dd></dl>' : '') +
       '<h3 style="margin-top:16px">Risks</h3>' + risksHtml + '</div></div></div>';
   }
 
@@ -411,6 +434,7 @@
       '<dt>Comparables used</dt><dd class="mono">' + ((m.comps || []).length) + ' live-token protocols</dd></dl>' +
       '<h3 style="margin:16px 0 8px;font-size:14px;color:var(--acc)">Ablation ladder — each term must earn its place</h3>' +
       (abRows ? '<dl class="kv" style="margin-top:10px">' + abRows + '</dl>' : '') +
+      '<p class="mut" style="font-size:13px">The shipped model is rung 2 — growth and maturity were pruned, and launch odds were fitted and rejected; the formula above states both. The LOO and walk-forward numbers describe the model on the board.</p>' +
       '<h3 style="margin:16px 0 8px;font-size:14px;color:var(--acc)">Category multiples (mcap / TVL, damped &gamma;=0.5)</h3>' +
       (multRows ? '<div class="tbl-wrap"><table class="tbl mini"><thead><tr><th>Category</th><th class="r">Multiple</th></tr></thead><tbody>' + multRows + '</tbody></table></div>' : '<p class="mut">No category multiples in data.</p>') +
       '</div>' +

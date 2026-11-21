@@ -1,4 +1,4 @@
-// model.ts — radar-4: the token radar's model.
+// model.ts — radar-5: the token radar's model.
 //
 // One snapshot of the protocol universe in, one ranked board out. The board
 // covers every slug in the snapshot's watchlist (the floor, never a ceiling)
@@ -22,11 +22,25 @@
 //      underlying protocols, so a token would capture a fee slice, not the
 //      full TVL. The factor is applied at half strength (factor^0.5); the
 //      curator 0.5x is NOT damped.
-//   4. implied = TVL x sizeCurve(TVL) x categoryFactor^0.5 x growth x maturity
-//      x stageDiscount(0.6) x 0.10 if the row carries a baked verification
-//      concern (8 slugs in lib/verify.ts), where growth = 1 + 0.5*clamp(change_7d,-60,120)/100
-//      and maturity = 0.6 + min(age,1095)/1095*0.4 (unknown age = 365d).
-//   5. Leave-one-out backtest of the fitted model is computed at runtime and
+//   4. implied = TVL x sizeCurve(TVL) x categoryFactor^0.5 x stageDiscount(0.6).
+//      Growth and maturity were PRUNED in radar-5: the ablation ladder shows
+//      both worsen held-out error (LOO x3.36 -> x3.74, walk-forward x2.77 ->
+//      x3.15), so the shipped model is the tested rung 2 — size x category x
+//      0.6 — and the printed LOO / walk-forward / coverage numbers describe
+//      exactly this model. Age and 7-day growth are no longer value inputs.
+//      The x0.10 concern haircut was ALSO dropped in radar-5: the 8 concern
+//      rows are shown at full value with the concern printed as a risk on the
+//      row (see lib/verify.ts), because the haircut hid the rows the board is
+//      supposed to surface and no other top board applies one.
+//   5. Launch odds (implied = value x odds) were FITTED and REJECTED in
+//      radar-5: a logistic on age + ln TVL + 7-day growth + category factor
+//      over all 758 protocols scores 10-fold Brier 0.212 vs 0.248 base, but
+//      walk-forward (fit the 322 oldest dated, price the 323 newest) Brier
+//      0.220 vs 0.229 base — 0.010 better, not the 0.05 the decision rule
+//      requires, and on the 2024-02-18 split every variant is worse than
+//      base. The age effect that drives the cohort table does not transfer
+//      forward in time, so no odds multiply the board.
+//   6. Leave-one-out backtest of the fitted model is computed at runtime and
 //      reported honestly in the model panel; the low/bull band is
 //      exp(+/-median absolute log error), clamped to [1.5x, 4x].
 //
@@ -47,7 +61,7 @@ import {
   type ExclusionReason,
 } from './verify.ts';
 
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 export const STAGE_DISCOUNT = 0.6;
 export const UNKNOWN_AGE_DAYS = 365;
 export const MATURITY_DAYS = 1095;
@@ -469,9 +483,11 @@ export type LadderRung = 0 | 1 | 2 | 3 | 4;
  * Predict a comp's mcap from a TRAIN set at a ladder rung. Rung 0 is a flat
  * global-median multiple, 1 adds the size curve, 2 adds the category factor
  * (the shipped model: size x factor x 0.6), 3 adds growth, 4 adds maturity.
- * Same arithmetic as score() and the LOO loop below, so rung 2 reproduces
- * the LOO numbers exactly. The stage discount 0.6 is in every rung so the
+ * Same arithmetic as score() at rung 2, so rung 2 reproduces the LOO
+ * numbers exactly. The stage discount 0.6 is in every rung so the
  * rungs are comparable with each other and with the shipped model.
+ * Rungs 3-4 are kept as the measured rejected alternatives: the ladder
+ * shows they worsen held-out error, which is why score() stops at rung 2.
  */
 function predictComp(
   train: AggComp[],
@@ -626,10 +642,11 @@ export function buildRadar(snapshot: Snapshot): {
   // --- walk-forward (time-split) backtest + ablation ladder (v4) ---
   // Fit on the OLDEST half of the dated comps, price the NEWEST half.
   // The ladder re-runs every rung under both holdouts (LOO and
-  // walk-forward). Growth and maturity are launch-case terms: they shape
-  // a pre-token row's launch value (criterion 2 names 7-day growth and
-  // time with no token as inputs), not the traded-cap fit — the ladder
-  // shows that honestly instead of hiding it.
+  // walk-forward). Growth and maturity are the measured rejected
+  // alternatives: the ladder shows both worsen held-out error (LOO
+  // x3.36 -> x3.74, walk-forward x2.77 -> x3.15), so radar-5 pruned
+  // them and ships rung 2 — the printed numbers describe the shipped
+  // model exactly.
   const ladderLabels = [
     'flat multiple',
     '+ size curve',
@@ -748,10 +765,6 @@ export function buildRadar(snapshot: Snapshot): {
     family: string | null;
   } => {
     const age = ageDays(p, asOfMs);
-    const effAge = age ?? UNKNOWN_AGE_DAYS;
-    const growth =
-      1 + (0.5 * clamp(p.change_7d ?? 0, -60, 120)) / 100;
-    const maturity = 0.6 + (Math.min(effAge, MATURITY_DAYS) / MATURITY_DAYS) * 0.4;
     const eff = effectiveFactor(p.category, liveAgg, globalMedian);
     const factor = dampedFactor(eff.factor, p.category);
     // TVL <= 0 would make the size curve blow up (tvl^(b-1) with b < 1);
@@ -759,22 +772,15 @@ export function buildRadar(snapshot: Snapshot): {
     if (!(p.tvl_usd > 0)) {
       return { base: 1, factor, age, source: eff.source, family: eff.family };
     }
-    // Concern haircut x0.10: a row carrying a baked verification concern
-    // (parent token already trades / stablecoin product / ...) has a base
-    // case of no new token, so the value shown is governance-option value
-    // only. Applied AFTER the stage discount, BEFORE rounding/banding; the
-    // low/bull band derives from the haircut base as usual.
-    const concernHaircut = concernFor(p.slug) !== undefined ? 0.1 : 1;
+    // radar-5: the shipped model is rung 2 — size x category x 0.6. No
+    // growth term, no maturity term (both worsen held-out error, see the
+    // ladder), no concern haircut (the 8 concern rows are shown at full
+    // value with the concern printed as a risk on the row). Age is
+    // returned for display and for the farm plan's holding window only.
     const base = Math.max(
       1,
       Math.round(
-        p.tvl_usd *
-          sizeMultiple(p.tvl_usd) *
-          factor *
-          growth *
-          maturity *
-          STAGE_DISCOUNT *
-          concernHaircut,
+        p.tvl_usd * sizeMultiple(p.tvl_usd) * factor * STAGE_DISCOUNT,
       ),
     );
     return { base, factor, age, source: eff.source, family: eff.family };
@@ -838,12 +844,7 @@ export function buildRadar(snapshot: Snapshot): {
     const risks: string[] = [];
     if (age === null) {
       risks.push(
-        'listed_at is missing in the snapshot — age assumed 365 days, so the maturity factor is a guess.',
-      );
-    }
-    if (p.change_7d === null) {
-      risks.push(
-        'change_7d is missing in the snapshot — the growth factor is neutral (1.0).',
+        'listed_at is missing in the snapshot — age assumed 365 days, so the farm plan’s holding window is a guess.',
       );
     }
     if (source === 'family') {
@@ -868,9 +869,9 @@ export function buildRadar(snapshot: Snapshot): {
       );
     }
     let confidence: 'high' | 'medium' | 'low';
-    if (evidence >= 5 && age !== null && p.change_7d !== null) {
+    if (evidence >= 5 && age !== null) {
       confidence = 'high';
-    } else if (evidence >= 2 && (age !== null || p.change_7d !== null)) {
+    } else if (evidence >= 2) {
       confidence = 'medium';
     } else {
       confidence = 'low';
@@ -940,7 +941,7 @@ export function buildRadar(snapshot: Snapshot): {
     .map((c) => [c.tvl, c.mcap, c.category]);
 
   // --- audit counterfactual: what the excluded rows would have scored ---
-  // Same score() path as board rows (growth/maturity/stage included). No
+  // Same score() path as board rows (size x category x 0.6). No
   // concern haircut applies: none of the excluded slugs carries a baked
   // verification concern — all 8 concern slugs are watchlist rows, which
   // bypass exclusion entirely. Assert it loudly rather than silently
@@ -1000,8 +1001,7 @@ export function buildRadar(snapshot: Snapshot): {
   const formula =
     `implied = TVL x exp(${loglog.a.toFixed(4)}) x TVL^(${(
       loglog.b - 1
-    ).toFixed(4)}) x categoryFactor^0.5 x ` +
-    `(1 + 0.5 x clamp(change_7d,-60,120)/100) x (0.6 + min(age,1095)/1095 x 0.4) x 0.6 x 0.10 if baked verification concern; ` +
+    ).toFixed(4)}) x categoryFactor^0.5 x 0.6; ` +
     `log(mcap) = ${loglog.a.toFixed(4)} + ${loglog.b.toFixed(
       4,
     )} x log(tvl) fitted on ${liveAgg.length} parent-aggregated live-token comps; ` +
@@ -1009,7 +1009,9 @@ export function buildRadar(snapshot: Snapshot): {
       4,
     )}, clamped [0.15, 2.0], prior weight 4; categories with fewer than 2 live comps use their family's pooled median instead (same shrinkage and clamp) — Vaults & allocators, Money markets, Perps & derivatives, Staking — and categories in no family fall back to 1.0; curators -> 0.5; ` +
     `the category factor is applied at half strength (factor^0.5) for every non-curator category, while the curator 0.5x is a structural nesting discount and stays undamped; ` +
-    `rows carrying a baked verification concern (8 slugs: parent token already trades, stablecoin product, chain, or no launch mechanism visible) get an additional x0.10 haircut after the stage discount, so the value shown is governance-option value only; ` +
+    `growth and maturity are NOT in the formula: the ablation ladder shows both worsen held-out error (LOO x3.36 -> x3.74, walk-forward x2.77 -> x3.15), so radar-5 ships rung 2 and the printed LOO / walk-forward / coverage numbers describe this model exactly; ` +
+    `rows carrying a baked verification concern (8 slugs: parent token already trades, stablecoin product, chain, or no launch mechanism visible) are shown at FULL value with the concern printed as a risk on the row — no haircut; ` +
+    `launch odds do NOT multiply the value: a logistic on age + ln TVL + 7-day growth + category factor scores 10-fold Brier 0.212 vs 0.248 base but walk-forward Brier 0.220 vs 0.229 base (0.010 better, below the 0.05 required), so odds were fitted and rejected; ` +
     `low/bull = base / x${band.toFixed(2)} (LOO median abs log error ${loo.medianAbsLogErr.toFixed(
       3,
     )}); stage discount 0.6.`;
