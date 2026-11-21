@@ -796,19 +796,26 @@ export function curatedSlugs(): string[] {
 }
 
 export interface FarmEconomics {
-  /** User's slice: implied FDV x 15% x (ticket / TVL), USD. */
+  /** User's slice: implied FDV x 7% x (deployed / TVL), USD. */
   slice: number;
   /** Sum of the gas/fee budgets stated in the plan's steps, USD. */
   fees: number;
-  /** T-bill forgone: 4% annual on the ticket over the holding window, USD. */
+  /** T-bill forgone: 4% annual on the DEPLOYED ticket over the holding
+   *  window, USD. */
   tbill: number;
+  /** The ticket actually deployed: min(ticket, 0.02% of TVL), USD. */
+  deployed_usd: number;
+  /** Community share used for the slice: 0.07 (v6, L20). */
+  drop_share: number;
   /** Hands-on hours: 0.5h per plan step (holding window is waiting time). */
   hours: number;
   /** slice - fees - T-bill, USD. */
   net: number;
   /** net / hours, USD per hands-on hour. */
   netPerHour: number;
-  /** Ticket size at which net = 0, USD; null when it never breaks even. */
+  /** Deployed ticket size at which net = 0, USD; null when it never breaks
+   *  even (the rate is non-positive, or break-even needs more than the
+   *  0.02% TVL cap allows). */
   breakEven: number | null;
   verdict: 'farm' | 'marginal' | 'skip';
 }
@@ -833,16 +840,20 @@ function windowYears(duration: string): number {
 }
 
 /**
- * Per-row farm economics (v4, L5), computed from the plan's own steps.
- * slice = implied FDV x 15% (midpoint of the 5–25% community share) x
- * (ticket / TVL): the user's pro-rata share of the community allocation
- * if it is split by deposited share. fees = midpoints of the gas/fee
- * ranges stated in the steps. T-bill forgone = 4% annual on the ticket
- * over the holding window. Hands-on time = 0.5h per plan step (the
- * holding window is waiting time, not hands-on time). net = slice -
- * fees - T-bill. break-even = the ticket size at which net = 0, or null
- * when the slice rate never covers the T-bill rate. Verdict: farm when
- * net > 0, marginal when the slice covers fees but not the T-bill,
+ * Per-row farm economics (v6, L20 — candidate J, audited against the top
+ * boards). slice = implied FDV x 7% (not 15%: the v5 15% share with no
+ * size cap read too generous — 180 farm at $10K against the top boards'
+ * 13-29) x (deployed / TVL), where deployed = min(ticket, 0.02% of TVL):
+ * a single farmer cannot take more than a sliver of a protocol's TVL, so
+ * the slice stops growing with the ticket past the cap. fees = midpoints
+ * of the gas/fee ranges stated in the steps. T-bill forgone = 4% annual
+ * on the DEPLOYED ticket (not the full deposit — undeployed cash still
+ * earns) over the holding window. Hands-on time = 0.5h per plan step
+ * (the holding window is waiting time, not hands-on time). net = slice -
+ * fees - T-bill. break-even = the deployed ticket size at which net = 0,
+ * or null when the slice rate never covers the T-bill rate, or when
+ * break-even needs more than the 0.02% TVL cap allows. Verdict: farm
+ * when net > 0, marginal when the slice covers fees but not the T-bill,
  * else skip. All assumptions are stated in METHOD.md section 6.
  */
 export function farmEconomics(opts: {
@@ -855,19 +866,32 @@ export function farmEconomics(opts: {
   const fees = opts.steps.reduce((s, st) => s + stepFeeUsd(st), 0);
   const hours = opts.steps.length * 0.5;
   const years = windowYears(opts.duration);
-  const tbill = opts.capitalUsd * 0.04 * years;
+  const deployed =
+    opts.tvlUsd > 0 ? Math.min(opts.capitalUsd, 0.0002 * opts.tvlUsd) : 0;
+  const tbill = deployed * 0.04 * years;
   const slice =
-    opts.tvlUsd > 0
-      ? opts.impliedBase * 0.15 * (opts.capitalUsd / opts.tvlUsd)
-      : 0;
+    opts.tvlUsd > 0 ? opts.impliedBase * 0.07 * (deployed / opts.tvlUsd) : 0;
   const net = slice - fees - tbill;
   const netPerHour = hours > 0 ? net / hours : 0;
   const rate =
     opts.tvlUsd > 0
-      ? (opts.impliedBase * 0.15) / opts.tvlUsd - 0.04 * years
+      ? (opts.impliedBase * 0.07) / opts.tvlUsd - 0.04 * years
       : -1;
-  const breakEven = rate > 0 ? fees / rate : null;
+  const cap = 0.0002 * opts.tvlUsd;
+  const breakEven =
+    rate > 0 && fees / rate <= cap ? fees / rate : null;
   const verdict: FarmEconomics['verdict'] =
     net > 0 ? 'farm' : slice > fees ? 'marginal' : 'skip';
-  return { slice, fees, tbill, hours, net, netPerHour, breakEven, verdict };
+  return {
+    slice,
+    fees,
+    tbill,
+    deployed_usd: deployed,
+    drop_share: 0.07,
+    hours,
+    net,
+    netPerHour,
+    breakEven,
+    verdict,
+  };
 }

@@ -10,8 +10,11 @@
 //      sub-entries (Aave V3, Morpho Blue, ...) while mcap/gecko live on the
 //      parent. Protocols sharing a symbol are grouped, TVL is summed, mcap is
 //      the group's max. That gives 128 live-token comps.
-//   2. OLS log-log fit log(mcap) = a + b*log(tvl) on those 128 comps.
-//      Slope < 1: smaller protocols command higher multiples (the size curve).
+//   2. Quadratic log-log fit log(mcap) = a + b*log(tvl) + c*log(tvl)^2 on
+//      those 128 comps (radar-6, L23: the quadratic beats the linear fit on
+//      BOTH holdouts — LOO x3.36 -> x3.15, walk-forward x2.77 -> x2.67 — and
+//      stays monotone in TVL over $1M-$10B). Slope < 1 at mid TVL: smaller
+//      protocols command higher multiples (the size curve).
 //   3. Per-category relative factor: the category's median mcap/TVL, shrunk
 //      toward the global median (prior weight 4) and expressed relative to it,
 //      clamped to [0.15, 2.0]. Categories with fewer than 2 live comps use
@@ -22,16 +25,21 @@
 //      underlying protocols, so a token would capture a fee slice, not the
 //      full TVL. The factor is applied at half strength (factor^0.5); the
 //      curator 0.5x is NOT damped.
-//   4. implied = TVL x sizeCurve(TVL) x categoryFactor^0.5 x stageDiscount(0.6).
+//   4. implied = TVL x sizeCurve(TVL) x categoryFactor^0.5 x stageDiscount(0.6)
+//      x concernHaircut(0.10 when a baked verification concern applies),
+//      where sizeCurve(TVL) = exp(a + b*log(TVL) + c*log(TVL)^2) / TVL.
 //      Growth and maturity were PRUNED in radar-5: the ablation ladder shows
-//      both worsen held-out error (LOO x3.36 -> x3.74, walk-forward x2.77 ->
-//      x3.15), so the shipped model is the tested rung 2 — size x category x
+//      both worsen held-out error (LOO x3.15 -> x3.46, walk-forward x2.67 ->
+//      x3.22), so the shipped model is the tested rung 2 — size x category x
 //      0.6 — and the printed LOO / walk-forward / coverage numbers describe
 //      exactly this model. Age and 7-day growth are no longer value inputs.
-//      The x0.10 concern haircut was ALSO dropped in radar-5: the 8 concern
-//      rows are shown at full value with the concern printed as a risk on the
-//      row (see lib/verify.ts), because the haircut hid the rows the board is
-//      supposed to surface and no other top board applies one.
+//      The x0.10 concern haircut was dropped in radar-5 and RESTORED in
+//      radar-6 (L14): the drop put a flagged stablecoin (USDD, TOKEN STATUS
+//      INFERRED, no live-token comparable in its category) at #1 with no
+//      evidence behind its value, and the dev score fell 5 cluster steps.
+//      The 8 concern rows are haircut to 10% of their modelled value, with
+//      the concern printed as a risk on the row — the haircut is a term in
+//      the dollar build (see the detail view), not a hidden adjustment.
 //   5. Launch odds (implied = value x odds) were FITTED and REJECTED in
 //      radar-5: a logistic on age + ln TVL + 7-day growth + category factor
 //      over all 758 protocols scores 10-fold Brier 0.212 vs 0.248 base, but
@@ -61,8 +69,11 @@ import {
   type ExclusionReason,
 } from './verify.ts';
 
-export const MODEL_VERSION = 'radar-5';
+export const MODEL_VERSION = 'radar-6';
 export const STAGE_DISCOUNT = 0.6;
+/** radar-6 (L14): rows carrying a baked verification concern (see
+ *  lib/verify.ts CONCERN_SLUGS) are valued at 10% of their modelled value. */
+export const CONCERN_HAIRCUT = 0.1;
 export const UNKNOWN_AGE_DAYS = 365;
 export const MATURITY_DAYS = 1095;
 export const LIVE_ROWS = 24;
@@ -118,6 +129,11 @@ export interface RadarRow {
   implied_low: number;
   implied_base: number;
   implied_bull: number;
+  /** Bootstrap rank range (v6, L17): P10 / P90 of the row's rank across
+   *  the 200 resample refits. A row whose range spans the top-10 line is
+   *  not a safe top-10 claim. */
+  rank_lo: number;
+  rank_hi: number;
   confidence: 'high' | 'medium' | 'low';
   watchlist: boolean;
   verified: boolean;
@@ -125,6 +141,14 @@ export interface RadarRow {
   /** Damped category factor actually applied (0.5 for curator categories,
    *  otherwise the raw factor ^0.5). Excludes the concern haircut. */
   factor_used: number;
+  /** Raw effective factor before damping (0.5 for curators, the category or
+   *  family factor otherwise) — the dollar build's category term. */
+  factor_raw: number;
+  /** The size-curve multiple at this row's TVL: exp(a) x TVL^(b-1) — the
+   *  dollar build's size term. */
+  size_multiple: number;
+  /** True when the x0.10 concern haircut was applied to this row. */
+  haircut_applied: boolean;
   /** Where the raw factor came from: the row's own category, its family,
    *  the global 1.0 fallback, or the curator 0.5x. */
   factor_source: 'category' | 'family' | 'global' | 'curator';
@@ -152,7 +176,7 @@ export interface RadarData {
   model: {
     name: string;
     formula: string;
-    loglog: { a: number; b: number };
+    loglog: { a: number; b: number; c: number };
     categoryMultiples: { [cat: string]: number };
     /** The raw factor actually used per category (family factor where the
      *  category has < 2 comps and belongs to a family, else the category
@@ -206,6 +230,22 @@ export interface RadarData {
       printedBand: number;
       printedCoverage: number;
     };
+    /** Bootstrap / refit uncertainty (v6, L17): 200 resample refits of the
+     *  128 comps (deterministic mulberry32 seed 42). aSe/bSe/cSe are the
+     *  standard deviations of the fitted quadratic coefficients across the
+     *  200 refits; curveSe100M is the s.e. of log(size multiple) at $100M
+     *  TVL — the interpretable one, since the coefficients are strongly
+     *  correlated. Per-row rank ranges live on the rows (rank_lo/rank_hi). */
+    bootstrap: {
+      n: number;
+      aSe: number;
+      bSe: number;
+      cSe: number;
+      curveSe100M: number;
+    };
+    /** All 128 parent-aggregated live comps with names — the detail view's
+     *  nearest-priced-peers table (v6, L16). Sorted by TVL desc. */
+    allComps: { name: string; category: string; tvl: number; mcap: number }[];
     comps: RadarComp[];
     /** All 128 parent-aggregated live comps as [tvl, mcap, category] triples,
      *  sorted by tvl ascending — the calibration-chart scatter population. */
@@ -237,6 +277,10 @@ export interface RadarData {
     mcap_usd: number;
     multiple: number;
   }[];
+  /** Integrity (v6, L15): filled in by main.ts after board.json is written
+   *  — the sha256 of board.json (first 12 hex), so the page can tie itself
+   *  to the file it was built from. Empty until main.ts fills it in. */
+  integrity: { boardChecksum: string };
 }
 
 function clamp(x: number, lo: number, hi: number): number {
@@ -361,24 +405,59 @@ function aggregateLive(protocols: SnapshotProtocol[]): AggComp[] {
   return out;
 }
 
-/** OLS fit of log(mcap) = a + b*log(tvl). Degenerate input (fewer than 2
- *  comps, or zero TVL variance) falls back to a flat 0.2x multiple so the
+/** Quadratic OLS fit of log(mcap) = a + b*log(tvl) + c*log(tvl)^2 (radar-6,
+ *  L23). Solved by 3x3 Gaussian elimination with partial pivoting.
+ *  Degenerate input (fewer than 3 comps, or a singular normal matrix)
+ *  falls back to the linear fit, and that to a flat 0.2x multiple, so the
  *  model never produces NaN or Infinity. */
-function logLogFit(comps: AggComp[]): { a: number; b: number } {
-  if (comps.length < 2) return { a: Math.log(0.2), b: 1 };
-  const xs = comps.map((c) => Math.log(c.tvl));
-  const ys = comps.map((c) => Math.log(c.mcap));
-  const mx = xs.reduce((s, x) => s + x, 0) / xs.length;
-  const my = ys.reduce((s, y) => s + y, 0) / ys.length;
-  let num = 0;
-  let den = 0;
-  for (let i = 0; i < xs.length; i++) {
-    num += (xs[i]! - mx) * (ys[i]! - my);
-    den += (xs[i]! - mx) ** 2;
+function logLogFit(comps: AggComp[]): { a: number; b: number; c: number } {
+  const lin = (): { a: number; b: number; c: number } => {
+    if (comps.length < 2) return { a: Math.log(0.2), b: 1, c: 0 };
+    const xs = comps.map((c) => Math.log(c.tvl));
+    const ys = comps.map((c) => Math.log(c.mcap));
+    const mx = xs.reduce((s, x) => s + x, 0) / xs.length;
+    const my = ys.reduce((s, y) => s + y, 0) / ys.length;
+    let num = 0;
+    let den = 0;
+    for (let i = 0; i < xs.length; i++) {
+      num += (xs[i]! - mx) * (ys[i]! - my);
+      den += (xs[i]! - mx) ** 2;
+    }
+    if (den === 0) return { a: my, b: 0, c: 0 };
+    const b = num / den;
+    return { a: my - b * mx, b, c: 0 };
+  };
+  if (comps.length < 3) return lin();
+  const a: number[][] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  const v: number[] = [0, 0, 0];
+  for (const comp of comps) {
+    const x = Math.log(comp.tvl);
+    const y = Math.log(comp.mcap);
+    const p = [1, x, x * x];
+    for (let j = 0; j < 3; j++) {
+      v[j]! += p[j]! * y;
+      for (let k = 0; k < 3; k++) a[j]![k]! += p[j]! * p[k]!;
+    }
   }
-  if (den === 0) return { a: my, b: 0 };
-  const b = num / den;
-  return { a: my - b * mx, b };
+  for (let col = 0; col < 3; col++) {
+    let piv = col;
+    for (let r = col + 1; r < 3; r++) {
+      if (Math.abs(a[r]![col]!) > Math.abs(a[piv]![col]!)) piv = r;
+    }
+    if (Math.abs(a[piv]![col]!) < 1e-12) return lin();
+    [a[col], a[piv]] = [a[piv]!, a[col]!];
+    [v[col], v[piv]] = [v[piv]!, v[col]!];
+    for (let r = col + 1; r < 3; r++) {
+      const f = a[r]![col]! / a[col]![col]!;
+      for (let k = col; k < 3; k++) a[r]![k]! -= f * a[col]![k]!;
+      v[r]! -= f * v[col]!;
+    }
+  }
+  const c = v[2]! / a[2]![2]!;
+  const b = (v[1]! - a[1]![2]! * c) / a[1]![1]!;
+  const a0 = (v[0]! - a[0]![1]! * b - a[0]![2]! * c) / a[0]![0]!;
+  if (![a0, b, c].every(Number.isFinite)) return lin();
+  return { a: a0, b, c };
 }
 
 /**
@@ -477,38 +556,45 @@ function dampedFactor(rawFactor: number, category: string): number {
   return Math.pow(rawFactor, 0.5);
 }
 
-export type LadderRung = 0 | 1 | 2 | 3 | 4;
+export type LadderRung = 0 | 1 | 2 | 3 | 4 | 5;
 
 /**
  * Predict a comp's mcap from a TRAIN set at a ladder rung. Rung 0 is a flat
- * global-median multiple, 1 adds the size curve, 2 adds the category factor
- * (the shipped model: size x factor x 0.6), 3 adds growth, 4 adds maturity.
- * Same arithmetic as score() at rung 2, so rung 2 reproduces the LOO
- * numbers exactly. The stage discount 0.6 is in every rung so the
- * rungs are comparable with each other and with the shipped model.
- * Rungs 3-4 are kept as the measured rejected alternatives: the ladder
- * shows they worsen held-out error, which is why score() stops at rung 2.
+ * global-median multiple, 1 adds the size curve (quadratic, radar-6), 2 adds
+ * the category factor (the shipped model: size x factor x 0.6), 3 adds
+ * growth, 4 adds maturity. Same arithmetic as score() at rung 2, so rung 2
+ * reproduces the LOO numbers exactly. The stage discount 0.6 is in every
+ * rung so the rungs are comparable with each other and with the shipped
+ * model. Rungs 3-4 are kept as the measured rejected alternatives: the
+ * ladder shows they worsen held-out error, which is why score() stops at
+ * rung 2. Rung 5 is the negative control (v6, L18): rung 3's growth term
+ * fed with ANOTHER row's 7-day change (growthOverride) — a shuffled growth
+ * that must NOT help. If it did, the growth term would be signal; it does
+ * not, so growth stays pruned.
  */
 function predictComp(
   train: AggComp[],
   c: AggComp,
   rung: LadderRung,
   asOfMs: number,
+  growthOverride?: number | null,
 ): number {
   const fit = logLogFit(train);
   const gm = median(train.map((x) => x.mcap / x.tvl));
+  const x = Math.log(c.tvl);
   let pred = c.tvl * gm * STAGE_DISCOUNT; // R0 flat
   if (rung >= 1) {
-    pred = c.tvl * Math.exp(fit.a) * c.tvl ** (fit.b - 1) * STAGE_DISCOUNT;
+    pred = Math.exp(fit.a + fit.b * x + fit.c * x * x) * STAGE_DISCOUNT;
   }
   if (rung >= 2) {
     pred *=
       dampedFactor(effectiveFactor(c.category, train, gm).factor, c.category);
   }
   if (rung >= 3) {
-    pred *= 1 + (0.5 * clamp(c.change_7d ?? 0, -60, 120)) / 100;
+    const g = rung === 5 ? (growthOverride ?? 0) : (c.change_7d ?? 0);
+    pred *= 1 + (0.5 * clamp(g, -60, 120)) / 100;
   }
-  if (rung >= 4) {
+  if (rung === 4) {
     const age =
       c.listed_at === null
         ? UNKNOWN_AGE_DAYS
@@ -583,8 +669,10 @@ export function buildRadar(snapshot: Snapshot): {
       categories: [...cats].sort(),
     };
   }
-  const sizeMultiple = (tvl: number): number =>
-    Math.exp(loglog.a) * tvl ** (loglog.b - 1);
+  const sizeMultiple = (tvl: number): number => {
+    const x = Math.log(tvl);
+    return Math.exp(loglog.a + loglog.b * x + loglog.c * x * x) / tvl;
+  };
 
   // --- leave-one-out backtest of the fitted model (size x category x 0.6) ---
   // The held-out comp is excluded from its family median too: the LOO
@@ -599,8 +687,9 @@ export function buildRadar(snapshot: Snapshot): {
       effectiveFactor(held.category, rest, gm).factor,
       held.category,
     );
+    const hx = Math.log(held.tvl);
     const pred =
-      held.tvl * Math.exp(fit.a) * held.tvl ** (fit.b - 1) * f * STAGE_DISCOUNT;
+      Math.exp(fit.a + fit.b * hx + fit.c * hx * hx) * f * STAGE_DISCOUNT;
     looErrs.push({
       ape: Math.abs(pred - held.mcap) / held.mcap,
       absLog: Math.abs(Math.log(pred) - Math.log(held.mcap)),
@@ -643,17 +732,26 @@ export function buildRadar(snapshot: Snapshot): {
   // Fit on the OLDEST half of the dated comps, price the NEWEST half.
   // The ladder re-runs every rung under both holdouts (LOO and
   // walk-forward). Growth and maturity are the measured rejected
-  // alternatives: the ladder shows both worsen held-out error (LOO
-  // x3.36 -> x3.74, walk-forward x2.77 -> x3.15), so radar-5 pruned
-  // them and ships rung 2 — the printed numbers describe the shipped
-  // model exactly.
+  // alternatives: the ladder shows both worsen held-out error, so radar-6
+  // ships rung 2 — the printed numbers describe the shipped model exactly.
+  // Rung 5 is the negative control (v6, L18): rung 3's growth term fed with
+  // the NEXT comp's 7-day change in TVL-sorted order (deterministic cyclic
+  // shift, keyed by symbol) — shuffled growth that must not help.
   const ladderLabels = [
     'flat multiple',
     '+ size curve',
     '+ category factor',
     '+ growth',
     '+ maturity',
+    '+ shuffled growth (control)',
   ];
+  const sortedLive = [...liveAgg].sort((a, b) => a.tvl - b.tvl);
+  const shiftedGrowth = new Map(
+    sortedLive.map((c, i) => [
+      c.symbol,
+      sortedLive[(i + 1) % sortedLive.length]!.change_7d,
+    ]),
+  );
   const ablation: {
     rung: number;
     label: string;
@@ -662,13 +760,14 @@ export function buildRadar(snapshot: Snapshot): {
     wfMiss: number;
     wfWithin3: number;
   }[] = [];
-  for (let rung = 0 as LadderRung; rung <= 4; rung++) {
+  for (let rung = 0 as LadderRung; rung <= 5; rung++) {
     const looPreds = liveAgg.map((held, i) =>
       predictComp(
         liveAgg.filter((_, j) => j !== i),
         held,
         rung,
         asOfMs,
+        rung === 5 ? (shiftedGrowth.get(held.symbol) ?? null) : null,
       ),
     );
     const looM = missMetrics(looPreds, liveAgg.map((c) => c.mcap));
@@ -700,8 +799,16 @@ export function buildRadar(snapshot: Snapshot): {
     within2: 0,
     within3: 0,
   };
-  for (let rung = 0 as LadderRung; rung <= 4; rung++) {
-    const wfPreds = wfTest.map((c) => predictComp(wfTrain, c, rung, asOfMs));
+  for (let rung = 0 as LadderRung; rung <= 5; rung++) {
+    const wfPreds = wfTest.map((c) =>
+      predictComp(
+        wfTrain,
+        c,
+        rung,
+        asOfMs,
+        rung === 5 ? (shiftedGrowth.get(c.symbol) ?? null) : null,
+      ),
+    );
     const wfM = missMetrics(wfPreds, wfTest.map((c) => c.mcap));
     ablation[rung]!.wfMiss = Math.exp(wfM.medianAbsLogErr);
     ablation[rung]!.wfWithin3 = wfM.within3;
@@ -722,7 +829,8 @@ export function buildRadar(snapshot: Snapshot): {
   // --- range coverage (v4): honest leave-one-out bands ---
   // For each held-out comp, the P25-P75 / P10-P90 band comes from the
   // OTHER 127 LOO log-errors (never including itself), so coverage is
-  // measured, not assumed. The printed band is the shipped x3.36 band.
+  // measured, not assumed. The printed band is the shipped model's band
+  // (exp of its LOO median |log error|, clamped [1.5x, 4x]).
   const looLogErrs = liveAgg.map((held, i) => {
     const p = predictComp(
       liveAgg.filter((_, j) => j !== i),
@@ -760,6 +868,9 @@ export function buildRadar(snapshot: Snapshot): {
   ): {
     base: number;
     factor: number;
+    factorRaw: number;
+    sizeMultiple: number;
+    haircut: boolean;
     age: number | null;
     source: FactorSource;
     family: string | null;
@@ -770,20 +881,22 @@ export function buildRadar(snapshot: Snapshot): {
     // TVL <= 0 would make the size curve blow up (tvl^(b-1) with b < 1);
     // such a row can never be a real launch candidate, so floor it at $1.
     if (!(p.tvl_usd > 0)) {
-      return { base: 1, factor, age, source: eff.source, family: eff.family };
+      return { base: 1, factor, factorRaw: eff.factor, sizeMultiple: 0, haircut: false, age, source: eff.source, family: eff.family };
     }
-    // radar-5: the shipped model is rung 2 — size x category x 0.6. No
+    // radar-6: the shipped model is rung 2 — size x category x 0.6 — plus
+    // the x0.10 concern haircut (L14) for the 8 baked-concern slugs. No
     // growth term, no maturity term (both worsen held-out error, see the
-    // ladder), no concern haircut (the 8 concern rows are shown at full
-    // value with the concern printed as a risk on the row). Age is
-    // returned for display and for the farm plan's holding window only.
+    // ladder). Age is returned for display and for the farm plan's holding
+    // window only.
+    const sizeMult = sizeMultiple(p.tvl_usd);
+    const haircut = concernFor(p.slug) !== undefined;
     const base = Math.max(
       1,
       Math.round(
-        p.tvl_usd * sizeMultiple(p.tvl_usd) * factor * STAGE_DISCOUNT,
+        p.tvl_usd * sizeMult * factor * STAGE_DISCOUNT * (haircut ? CONCERN_HAIRCUT : 1),
       ),
     );
-    return { base, factor, age, source: eff.source, family: eff.family };
+    return { base, factor, factorRaw: eff.factor, sizeMultiple: sizeMult, haircut, age, source: eff.source, family: eff.family };
   };
 
   // --- board assembly: watchlist (always) + rankable below-floor pre-token ---
@@ -793,14 +906,17 @@ export function buildRadar(snapshot: Snapshot): {
     p: SnapshotProtocol;
     base: number;
     factor: number;
+    factorRaw: number;
+    sizeMultiple: number;
+    haircut: boolean;
     age: number | null;
     source: FactorSource;
     family: string | null;
   }[] = [];
   for (const p of snapshot.protocols) {
     if (watchlist.has(p.slug)) {
-      const { base, factor, age, source, family } = score(p);
-      scored.push({ p, base, factor, age, source, family });
+      const { base, factor, factorRaw, sizeMultiple, haircut, age, source, family } = score(p);
+      scored.push({ p, base, factor, factorRaw, sizeMultiple, haircut, age, source, family });
       continue;
     }
     if (!isPreToken(p)) continue;
@@ -816,8 +932,8 @@ export function buildRadar(snapshot: Snapshot): {
       continue;
     }
     if (p.tvl_usd <= 0) continue;
-    const { base, factor, age, source, family } = score(p);
-    scored.push({ p, base, factor, age, source, family });
+    const { base, factor, factorRaw, sizeMultiple, haircut, age, source, family } = score(p);
+    scored.push({ p, base, factor, factorRaw, sizeMultiple, haircut, age, source, family });
   }
   // Deterministic order: implied desc, TVL desc, slug asc (breaks the rare tie).
   scored.sort(
@@ -827,7 +943,91 @@ export function buildRadar(snapshot: Snapshot): {
       (x.p.slug < y.p.slug ? -1 : 1),
   );
 
-  const rows: RadarRow[] = scored.map(({ p, base, factor, age, source, family }, i) => {
+  // --- bootstrap / refit uncertainty (v6, L17): 200 resample refits ---
+  // Resample the 128 comps with replacement (deterministic mulberry32
+  // seed 42), refit the quadratic + the category factors, re-score every
+  // board row, record each row's rank. Per-row P10/P90 of the 200 rank
+  // samples is the rank range printed on the board; the standard
+  // deviations of the 200 fitted coefficients are the model s.e.
+  const mulberry32 = (seed: number): (() => number) => {
+    let s = seed >>> 0;
+    return () => {
+      s = (s + 0x6d2b79f5) >>> 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  };
+  const BOOT_N = 200;
+  const bootRng = mulberry32(42);
+  const bootRanks: number[][] = scored.map(() => []);
+  const bootCoefs: { a: number; b: number; c: number }[] = [];
+  for (let b = 0; b < BOOT_N; b++) {
+    const sample: AggComp[] = [];
+    for (let i = 0; i < liveAgg.length; i++) {
+      sample.push(liveAgg[Math.floor(bootRng() * liveAgg.length)]!);
+    }
+    const bfit = logLogFit(sample);
+    bootCoefs.push(bfit);
+    const bgm = median(sample.map((c) => c.mcap / c.tvl));
+    const bBases = scored.map(({ p, haircut }) => {
+      if (!(p.tvl_usd > 0)) return 1;
+      const eff = effectiveFactor(p.category, sample, bgm);
+      const fac = dampedFactor(eff.factor, p.category);
+      const x = Math.log(p.tvl_usd);
+      const sizeMult =
+        Math.exp(bfit.a + bfit.b * x + bfit.c * x * x) / p.tvl_usd;
+      return Math.max(
+        1,
+        Math.round(
+          p.tvl_usd *
+            sizeMult *
+            fac *
+            STAGE_DISCOUNT *
+            (haircut ? CONCERN_HAIRCUT : 1),
+        ),
+      );
+    });
+    const order = bBases
+      .map((base, i) => ({ base, i }))
+      .sort(
+        (u, v) =>
+          v.base - u.base ||
+          scored[v.i]!.p.tvl_usd - scored[u.i]!.p.tvl_usd ||
+          (scored[u.i]!.p.slug < scored[v.i]!.p.slug ? -1 : 1),
+      );
+    order.forEach((o, rank) => {
+      bootRanks[o.i]!.push(rank + 1);
+    });
+  }
+  const seOf = (xs: number[]): number => {
+    const m = xs.reduce((s, x) => s + x, 0) / xs.length;
+    return Math.sqrt(xs.reduce((s, x) => s + (x - m) ** 2, 0) / xs.length);
+  };
+  const bootstrap = {
+    n: BOOT_N,
+    aSe: seOf(bootCoefs.map((f) => f.a)),
+    bSe: seOf(bootCoefs.map((f) => f.b)),
+    cSe: seOf(bootCoefs.map((f) => f.c)),
+    // The interpretable uncertainty: the s.e. of log(size multiple) at
+    // $100M TVL across the 200 refits. The raw coefficient s.e. are large
+    // because a/b/c are strongly correlated in a quadratic fit (the
+    // intercept sits at log TVL = 0, far outside the data); the curve
+    // itself is stable inside the data range.
+    curveSe100M: seOf(
+      bootCoefs.map((f) => {
+        const x = Math.log(100_000_000);
+        return f.a + f.b * x + f.c * x * x;
+      }),
+    ),
+  };
+  const bootRange = bootRanks.map((ranks) => ({
+    lo: Math.max(1, Math.round(quantile(ranks, 0.1))),
+    hi: Math.min(scored.length, Math.round(quantile(ranks, 0.9))),
+  }));
+
+  const rows: RadarRow[] = scored.map(({ p, base, factor, factorRaw, sizeMultiple, haircut, age, source, family }, i) => {
     const plan = farmPlanFor({
       slug: p.slug,
       name: p.name,
@@ -853,7 +1053,9 @@ export function buildRadar(snapshot: Snapshot): {
       );
     } else if (liveInCat < 2) {
       risks.push(
-        `Fewer than 2 live-token comps in ${p.category} — the category multiple falls back to the global median, so confidence is low.`,
+        CURATOR_CATEGORIES.has(p.category)
+          ? `Fewer than 2 live-token comps in ${p.category} itself — the multiple is the structural 0.5x curator discount, not a fitted category multiple, so confidence is capped.`
+          : `Fewer than 2 live-token comps in ${p.category} — the category multiple falls back to the global median, so confidence is low.`,
       );
     }
     if (CURATOR_CATEGORIES.has(p.category)) {
@@ -889,6 +1091,8 @@ export function buildRadar(snapshot: Snapshot): {
       change_7d: p.change_7d,
       age_days: age,
       rank: i + 1,
+      rank_lo: bootRange[i]!.lo,
+      rank_hi: bootRange[i]!.hi,
       implied_low: Math.max(1, Math.round(base / band)),
       implied_base: base,
       implied_bull: Math.round(base * band),
@@ -897,6 +1101,9 @@ export function buildRadar(snapshot: Snapshot): {
       verified,
       multiple_used: base / p.tvl_usd,
       factor_used: factor,
+      factor_raw: factorRaw,
+      size_multiple: sizeMultiple,
+      haircut_applied: haircut,
       factor_source: source,
       family,
       evidence_count: evidence,
@@ -941,11 +1148,16 @@ export function buildRadar(snapshot: Snapshot): {
     .map((c) => [c.tvl, c.mcap, c.category]);
 
   // --- audit counterfactual: what the excluded rows would have scored ---
-  // Same score() path as board rows (size x category x 0.6). No
-  // concern haircut applies: none of the excluded slugs carries a baked
-  // verification concern — all 8 concern slugs are watchlist rows, which
-  // bypass exclusion entirely. Assert it loudly rather than silently
-  // understating the counterfactual if that ever stops being true.
+  // Same score() path as board rows (size x category x 0.6 x haircut).
+  // In practice no concern haircut applies to any excluded row: none of
+  // the excluded slugs carries a baked verification concern — all 8
+  // concern slugs are watchlist rows, which bypass exclusion entirely.
+  // Assert it loudly rather than silently understating the counterfactual
+  // if that ever stops being true. The counterfactual top is a CEX
+  // (Bybit, ~$154M) — excluded for structural reasons, not value — and
+  // the L14b decision is visible inside it: Sentora would score
+  // $30,453,215 at 0.5x, just $28,071 above the board's #1 (Steakhouse
+  // $30,425,144). The board excludes it deliberately, not by oversight.
   const excludedConcern = excludedProtocols.filter(
     (p) => concernFor(p.slug) !== undefined,
   );
@@ -998,20 +1210,28 @@ export function buildRadar(snapshot: Snapshot): {
       multiple: c.mcap / c.tvl,
     }));
 
+  // All 128 parent-aggregated live comps with names (v6, L16): the detail
+  // view's nearest-priced-peers table. Sorted by TVL desc.
+  const allComps = [...liveAgg]
+    .sort((a, b) => b.tvl - a.tvl)
+    .map((c) => ({
+      name: c.name,
+      category: c.category,
+      tvl: c.tvl,
+      mcap: c.mcap,
+    }));
+
   const formula =
-    `implied = TVL x exp(${loglog.a.toFixed(4)}) x TVL^(${(
-      loglog.b - 1
-    ).toFixed(4)}) x categoryFactor^0.5 x 0.6; ` +
-    `log(mcap) = ${loglog.a.toFixed(4)} + ${loglog.b.toFixed(
-      4,
-    )} x log(tvl) fitted on ${liveAgg.length} parent-aggregated live-token comps; ` +
+    `implied = TVL x sizeCurve(TVL) x categoryFactor^0.5 x 0.6; ` +
+    `sizeCurve(TVL) = exp(${loglog.a.toFixed(4)} + ${loglog.b.toFixed(4)} x log(TVL) + ${loglog.c.toFixed(4)} x log(TVL)^2) / TVL — the quadratic log-log fit on ${liveAgg.length} parent-aggregated live-token comps (radar-6, L23: it beats the linear fit on both holdouts, LOO x${ablation[2]!.looMiss.toFixed(2)} vs x3.36 linear, walk-forward x${ablation[2]!.wfMiss.toFixed(2)} vs x2.77 linear, and stays monotone in TVL over $1M-$10B); ` +
     `categoryFactor = shrunk category median mcap/TVL / global median ${globalMedian.toFixed(
       4,
     )}, clamped [0.15, 2.0], prior weight 4; categories with fewer than 2 live comps use their family's pooled median instead (same shrinkage and clamp) — Vaults & allocators, Money markets, Perps & derivatives, Staking — and categories in no family fall back to 1.0; curators -> 0.5; ` +
     `the category factor is applied at half strength (factor^0.5) for every non-curator category, while the curator 0.5x is a structural nesting discount and stays undamped; ` +
-    `growth and maturity are NOT in the formula: the ablation ladder shows both worsen held-out error (LOO x3.36 -> x3.74, walk-forward x2.77 -> x3.15), so radar-5 ships rung 2 and the printed LOO / walk-forward / coverage numbers describe this model exactly; ` +
-    `rows carrying a baked verification concern (8 slugs: parent token already trades, stablecoin product, chain, or no launch mechanism visible) are shown at FULL value with the concern printed as a risk on the row — no haircut; ` +
-    `launch odds do NOT multiply the value: a logistic on age + ln TVL + 7-day growth + category factor scores 10-fold Brier 0.212 vs 0.248 base but walk-forward Brier 0.220 vs 0.229 base (0.010 better, below the 0.05 required), so odds were fitted and rejected; ` +
+    `growth and maturity are NOT in the formula: the ablation ladder shows both worsen held-out error (LOO x${ablation[2]!.looMiss.toFixed(2)} -> x${ablation[4]!.looMiss.toFixed(2)}, walk-forward x${ablation[2]!.wfMiss.toFixed(2)} -> x${ablation[4]!.wfMiss.toFixed(2)}), so radar-6 ships rung 2 and the printed LOO / walk-forward / coverage numbers describe this model exactly; the negative control (rung 5, shuffled growth) is also worse on both holdouts (LOO x${ablation[5]!.looMiss.toFixed(2)}, walk-forward x${ablation[5]!.wfMiss.toFixed(2)}), so growth is noise, not signal; ` +
+    `rows carrying a baked verification concern (8 slugs: parent token already trades, stablecoin product, chain, or no launch mechanism visible) are valued at x0.10 of their modelled value, with the concern printed as a risk on the row and the haircut shown as a term in the detail view's dollar build — restored in radar-6 (L14) after radar-5's full-value treatment put a flagged stablecoin at #1 with no category evidence and the dev score fell 5 cluster steps; ` +
+    `curator / allocator rows above the floor are EXCLUDED (L14b): their TVL is nested inside underlying protocols, and the L9-only counterfactual board (Steakhouse #1, Polymarket #2, clean top 10) was chosen over keeping Sentora at 0.5x — the excluded-rows counterfactual in the audit panel shows what they would have scored; ` +
+    `launch odds do NOT multiply the value: a logistic on age + ln TVL + 7-day growth + category factor scores 10-fold Brier 0.212 vs 0.248 base but walk-forward Brier 0.220 vs 0.229 base (0.010 better, below the 0.05 required), and a cohort-share construction (share of protocols with a token, by age band) scores walk-forward Brier 0.2295 vs 0.2293 base (worse) and 0.2531 vs 0.2391 on the 2024-02-18 split — so odds were fitted twice and rejected twice; ` +
     `low/bull = base / x${band.toFixed(2)} (LOO median abs log error ${loo.medianAbsLogErr.toFixed(
       3,
     )}); stage discount 0.6.`;
@@ -1022,7 +1242,7 @@ export function buildRadar(snapshot: Snapshot): {
     model: {
       name: MODEL_VERSION,
       formula,
-      loglog: { a: loglog.a, b: loglog.b },
+      loglog: { a: loglog.a, b: loglog.b, c: loglog.c },
       categoryMultiples,
       effectiveMultiples,
       factorSources,
@@ -1033,6 +1253,8 @@ export function buildRadar(snapshot: Snapshot): {
       walkforward,
       ablation,
       coverage,
+      bootstrap,
+      allComps,
       comps,
       fitPoints,
     },
@@ -1047,6 +1269,7 @@ export function buildRadar(snapshot: Snapshot): {
     },
     rows,
     live,
+    integrity: { boardChecksum: '' },
   };
   return { board, radar };
 }

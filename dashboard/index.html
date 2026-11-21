@@ -9,109 +9,95 @@
 </head>
 <body>
 <header class="top">
-  <div class="wrap top-in">
-    <div class="brand">
-      <div>
-        <h1>TOKEN RADAR</h1>
-        <p class="sub">Pre-token DeFi, ranked by implied launch value &middot; snapshot <span id="asof">&mdash;</span></p>
-      </div>
-    </div>
-    <nav class="tabs" aria-label="Views">
-      <a href="#/board" data-view="board" class="on">Board</a>
-      <a href="#/model" data-view="model">Model &amp; audit</a>
-      <a href="#/comps" data-view="comps">Live comps</a>
-    </nav>
-  </div>
+<div class="wrap top-in">
+<div class="brand">
+<div>
+<h1>TOKEN RADAR</h1>
+<p class="sub">Pre-token DeFi, ranked by implied launch value &middot; snapshot <span id="asof">&mdash;</span></p>
+</div>
+</div>
+<nav class="tabs">
+<a href="#/board" data-view="board" class="on">Board</a>
+<a href="#/model" data-view="model">Model &amp; audit</a>
+</nav>
+</div>
 </header>
-
 <main class="wrap" id="app">
-  <div id="err" class="err" hidden></div>
+<div id="err" class="err" hidden></div>
+<section id="view-board" class="view">
+<div id="stats" class="stats"></div>
+<div class="board-grid" id="board-grid">
+<div class="panel top10">
+<div class="panel-h">
+<h2>Top 10 &mdash; highest implied launch value</h2>
 
-  <section id="view-board" class="view">
-    <div id="stats" class="stats" aria-label="Coverage summary"></div>
-
-    <div class="board-grid" id="board-grid">
-    <div class="panel top10">
-      <div class="panel-h">
-        <h2>Top 10 &mdash; highest implied launch value</h2>
-        <span class="hint">Click any row for its farm plan.</span>
-      </div>
-      <div class="tbl-wrap"><table class="tbl" id="top10tbl">
-        <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>TVL</th><th>7d</th><th>Implied FDV</th><th>Conf.</th></tr></thead>
-        <tbody id="top10body"><tr><td colspan="7" class="mut">Loading board&hellip;</td></tr></tbody>
-      </table></div>
-    </div>
-    <div class="panel">
-      <div class="panel-h">
-        <h2>Fit vs live comps</h2>
-      </div>
-      <div style="padding:4px 16px 14px" id="board-scatter"></div>
-    </div>
-    </div>
-
-    <div class="panel filters" aria-label="Board filters">
-      <div class="f-row">
-        <label class="f-search"><span>Search</span><input id="f-q" type="search" placeholder="name or slug&hellip;" autocomplete="off"></label>
-        <label><span>Category</span><select id="f-cat"><option value="all">All categories</option></select></label>
-        <label><span>Chain</span><select id="f-chain"><option value="all">All chains</option></select></label>
-        <label><span>TVL band</span><select id="f-band">
-          <option value="all">Any TVL</option><option value="b1">&ge; $1B</option>
-          <option value="b2">$500M &ndash; $1B</option><option value="b3">$100M &ndash; $500M</option>
-          <option value="b4">$50M &ndash; $100M</option><option value="b5">&lt; $50M</option>
-        </select></label>
-        <label><span>Confidence</span><select id="f-conf">
-          <option value="all">Any confidence</option><option value="high">High</option>
-          <option value="medium">Medium</option><option value="low">Low</option>
-        </select></label>
-        <label class="f-check"><input id="f-wl" type="checkbox"> <span>Watchlist only</span></label>
-      </div>
-      <div class="f-row f-row2">
-        <label><span>Deposit</span><select id="f-dep">
-          <option value="250">$250</option><option value="1000">$1,000</option>
-          <option value="10000" selected>$10,000</option><option value="50000">$50,000</option>
-        </select></label>
-        <label><span>Sort by</span><select id="f-sort">
-          <option value="rank">Rank</option><option value="implied">Implied FDV</option>
-          <option value="tvl">TVL</option><option value="age">Age</option><option value="chg">7d change</option>
-          <option value="net">Net $</option><option value="neth">Net per hour</option>
-        </select></label>
-        <button id="f-dir" type="button" title="Toggle sort direction">&#8595; desc</button>
-        <button id="f-reset" type="button">Reset filters</button>
-        <span id="count" class="count" aria-live="polite"></span>
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="tbl-wrap"><table class="tbl" id="boardtbl">
-        <thead><tr>
-          <th data-sort="rank">#</th><th>Protocol</th><th>Category</th><th>Chains</th>
-          <th data-sort="tvl">TVL</th><th data-sort="chg">7d</th><th data-sort="age">Age</th>
-          <th data-sort="implied">Implied FDV</th><th data-sort="net">Net</th><th data-sort="neth">Net/h</th><th>Conf.</th>
-        </tr></thead>
-        <tbody id="tbody"><tr><td colspan="11" class="mut">Loading board&hellip;</td></tr></tbody>
-      </table></div>
-      <p class="foot-note">Implied FDV is a range (low / base / bull) in the detail view. Values come from the snapshot&rsquo;s own live-token comparables &mdash; see Model &amp; audit.</p>
-    </div>
-  </section>
-
-  <section id="view-detail" class="view" hidden>
-    <p class="back"><a href="#/board">&larr; Back to board</a></p>
-    <div id="detail"></div>
-  </section>
-
-  <section id="view-model" class="view" hidden>
-    <div id="model"></div>
-  </section>
-
-  <section id="view-comps" class="view" hidden>
-    <div id="comps"></div>
-  </section>
+</div>
+<div class="tbl-wrap"><table class="tbl" id="top10tbl">
+<thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>TVL</th><th>7d</th><th>Implied FDV</th><th>Conf.</th></tr></thead>
+<tbody id="top10body"><tr><td colspan="7" class="mut">Loading board&hellip;</td></tr></tbody>
+</table></div>
+</div>
+<div class="panel">
+<div class="panel-h">
+<h2>Fit vs live comps</h2>
+</div>
+<div style="padding:4px 16px 14px" id="board-scatter"></div>
+</div>
+</div>
+<div class="panel filters">
+<div class="f-row">
+<label class="f-search"><span>Search</span><input id="f-q" type="search" placeholder="name or slug&hellip;" autocomplete="off"></label>
+<label><span>Category</span><select id="f-cat"><option value="all">All categories</option></select></label>
+<label><span>Chain</span><select id="f-chain"><option value="all">All chains</option></select></label>
+<label><span>TVL band</span><select id="f-band">
+<option value="all">Any TVL</option><option value="b1">&ge; $1B</option>
+<option value="b2">$500M &ndash; $1B</option><option value="b3">$100M &ndash; $500M</option>
+<option value="b4">$50M &ndash; $100M</option><option value="b5">&lt; $50M</option>
+</select></label>
+<label><span>Confidence</span><select id="f-conf">
+<option value="all">Any confidence</option><option value="high">High</option>
+<option value="medium">Medium</option><option value="low">Low</option>
+</select></label>
+<label class="f-check"><input id="f-wl" type="checkbox"> <span>Watchlist only</span></label>
+</div>
+<div class="f-row f-row2">
+<label><span>Deposit</span><select id="f-dep">
+<option value="250">$250</option><option value="1000">$1,000</option>
+<option value="10000" selected>$10,000</option><option value="50000">$50,000</option>
+</select></label>
+<label><span>Sort by</span><select id="f-sort">
+<option value="rank">Rank</option><option value="implied">Implied FDV</option>
+<option value="tvl">TVL</option><option value="age">Age</option><option value="chg">7d change</option>
+<option value="net">Net $</option><option value="neth">Net per hour</option>
+</select></label>
+<button id="f-dir" type="button">&#8595; desc</button>
+<button id="f-reset" type="button">Reset filters</button>
+<span id="count" class="count" aria-live="polite"></span>
+</div>
+</div>
+<div class="panel">
+<div class="tbl-wrap"><table class="tbl" id="boardtbl">
+<thead><tr>
+<th data-sort="rank">#</th><th>Range</th><th>Protocol</th><th>Category</th><th>Chains</th>
+<th data-sort="tvl">TVL</th><th data-sort="chg">7d</th><th data-sort="age">Age</th>
+<th data-sort="implied">Implied FDV</th><th data-sort="net">Net</th><th data-sort="neth">Net/h</th><th>Conf.</th>
+</tr></thead>
+<tbody id="tbody"><tr><td colspan="12" class="mut">Loading board&hellip;</td></tr></tbody>
+</table></div>
+<p class="foot-note">Implied FDV is a range (low / base / bull) in the detail view.</p>
+</div>
+</section>
+<section id="view-detail" class="view" hidden>
+<p class="back"><a href="#/board">&larr; Back to board</a></p>
+<div id="detail"></div>
+</section>
+<section id="view-model" class="view" hidden>
+<div id="model"></div>
+</section>
 </main>
-
 <footer class="wrap foot">
-  <p>Source: sealed DefiLlama snapshot (<span id="asof2">&mdash;</span>). One model drives this page and board.json; this page makes no network requests — every figure is baked into data.js. Implied values are estimates from comparables, not predictions — a token may never launch.</p>
+<p>Source: sealed DefiLlama snapshot (<span id="asof2">&mdash;</span>). One model drives this page and board.json; this page makes no network requests — every figure is baked into data.js. Implied values are estimates from comparables, not predictions — a token may never launch.</p>
 </footer>
-
 <script src="../data.js"></script>
 <script src="app.js"></script>
 </body>

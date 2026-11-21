@@ -37,6 +37,13 @@
 //    and the like) is untouched: every top board excludes those too.
 //  - Below the floor, category rules (CEX / bridge / chain) plus the baked
 //    BELOW_FLOOR_SLUGS table exclude 58 of 210, leaving 152 rankable rows.
+//  - radar-6 (L14b) REVERTS the 2026-11-21 curator re-admission: the six
+//    curator rows are excluded again (reason 'curator'). The v6 diagnosis
+//    showed the re-admission put Sentora at #2 with a fallback factor on
+//    nested/double-counted TVL, and the L9-only counterfactual board
+//    (Steakhouse #1, Polymarket #2, clean top 10) was chosen over keeping
+//    Sentora at 0.5x. The counterfactual is printed in METHOD.md §4 and in
+//    the dashboard's audit panel, so the choice is explicit, not by default.
 
 export type ExclusionReason =
   | 'cex'
@@ -66,8 +73,15 @@ export const REASON_LABELS: Record<ExclusionReason, string> = {
 /** Pre-token protocols at/above the $50M floor that the house left off the
  *  watchlist (77). Nine more were here until the 2026-11-15 revision and were
  *  re-admitted after snapshot verification, and six curator rows until the
- *  2026-11-21 revision — see the header comment. */
+ *  2026-11-21 revision (re-admitted, then RE-EXCLUDED in radar-6, L14b) —
+ *  see the header comment. */
 export const EXCLUDED_ABOVE_FLOOR: Record<string, ExclusionReason> = {
+  'aera-v3': 'curator',
+  'avant-avusd': 'curator',
+  'ipor-fusion': 'curator',
+  'mellow-core': 'curator',
+  'sentora-curator': 'curator',
+  'solv-strategies': 'curator',
   'aster-bridge': 'bridge',
   'base-bridge': 'bridge',
   'binance-bitcoin': 'bridge',

@@ -45,13 +45,14 @@
     return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + '×';
   }
   
-  function impliedValueFromComps(tvl, category) {
+  function impliedValueFromComps(tvl, category, haircut) {
     var m = D.model || {}, ll = m.loglog || {}, mults = m.effectiveMultiples || {};
-    var a = num(ll.a), b = num(ll.b);
-    if (a === null || b === null || !(tvl > 0)) return null;
+    var a = num(ll.a), b = num(ll.b), c = num(ll.c);
+    if (a === null || b === null || c === null || !(tvl > 0)) return null;
     var raw = mults[category]; if (raw == null) raw = 1;
     var f = (category === 'Risk Curators' || category === 'Onchain Capital Allocator') ? 0.5 : Math.pow(raw, 0.5);
-    var v = tvl * Math.exp(a) * Math.pow(tvl, b - 1) * f * 0.6;
+    var x = Math.log(tvl);
+    var v = Math.exp(a + b * x + c * x * x) * f * 0.6 * (haircut ? 0.1 : 1);
     return Math.max(1, Math.round(v));
   }
   function pctCls(n) {
@@ -86,15 +87,14 @@
     return PAL[h % PAL.length];
   }
   function rowLink(r) { return '#/protocol/' + encodeURIComponent(r.slug); }
-  function wlMark(r) { return r.watchlist ? '<span class="wl-dot" title="Watchlist"></span>' : ''; }
+  function wlMark(r) { return r.watchlist ? '<span class="wl-dot"></span>' : ''; }
 
   if (!D || !Array.isArray(D.rows) || !D.rows.length) {
     errBox.hidden = false;
     errBox.innerHTML = '<b>No radar data found.</b> This page reads <span class="mono">window.RADAR</span> ' +
-      'from <span class="mono">data.js</span> beside the dashboard folder. If you opened index.html ' +
-      'directly, serve the output folder instead so the data file loads.';
+      'from <span class="mono">data.js</span> beside the dashboard folder. Serve the output folder instead of opening index.html directly.';
     var tb = document.getElementById('tbody');
-    if (tb) tb.innerHTML = '<tr><td colspan="11" class="mut">No data — data.js did not load.</td></tr>';
+    if (tb) tb.innerHTML = '<tr><td colspan="12" class="mut">No data — data.js did not load.</td></tr>';
     var t10 = document.getElementById('top10body');
     if (t10) t10.innerHTML = '<tr><td colspan="7" class="mut">No data — data.js did not load.</td></tr>';
     return;
@@ -119,7 +119,7 @@
     var aud = D.audit || {};
     var ex = (aud.excluded || []).reduce(function (s, e) { return s + (e.count || 0); }, 0);
     document.getElementById('stats').innerHTML =
-      stat(rows.length, 'protocols ranked', 'of ' + (aud.total || 758) + ' read: ' + (aud.withToken || 416) + ' already trade, ' + ex + ' excluded with a reason') +
+      stat(rows.length, 'protocols ranked', 'of ' + (aud.total || 758) + ' read: ' + (aud.withToken || 416) + ' trade, ' + ex + ' excluded') +
       stat(wl + ' / ' + (aud.watchlist || 40), 'watchlist covered', 'every watchlist protocol is on the board') +
       stat(fmtUsd(tvl), 'board TVL', 'combined TVL of ranked protocols') +
       stat(fmtUsd(top ? top.implied_base : null), 'top implied FDV', esc(top ? top.name : ''));
@@ -138,33 +138,50 @@
         '<td>' + catChip(r.category) + '</td>' +
         '<td class="num">' + fmtUsd(r.tvl_usd) + '</td>' +
         '<td class="num ' + pctCls(r.change_7d) + '">' + fmtPct(r.change_7d) + '</td>' +
-        '<td title="Low ' + fmtUsd(r.implied_low) + ' – bull ' + fmtUsd(r.implied_bull) + '"><span class="num"><b>' + fmtUsd(r.implied_base) + '</b></span>' +
-        '<span class="bar"><i style="width:' + Math.max(2, Math.round(100 * (num(r.implied_base) || 0) / maxBase)) + '%"></i></span></td>' +
+        '<td><span class="num"><b>' + fmtUsd(r.implied_base) + '</b></span></td>' +
         '<td>' + confBadge(r.confidence) + '</td></tr>';
     }
     document.getElementById('top10body').innerHTML = h;
   }
 
   
-  function renderModelStrip() {
+  // Model + integrity strips (v6, L15), inserted above the board grid. The
+  // integrity strip recomputes every row's implied value on this page from
+  // its own stored terms (TVL x size multiple x category factor x 0.6 x
+  // 0.10 haircut where it applies), in the same order as the build, and
+  // ties the page to board.json via its sha256 (set by main.ts).
+  function renderStrips() {
     var m = D.model || {}, loo = m.loo || {}, wf = m.walkforward || {}, cv = m.coverage || {};
     var x = loo.medianAbsLogErr != null ? Math.exp(loo.medianAbsLogErr).toFixed(2) : 'n/a';
     var w = wf.miss != null ? '&times;' + wf.miss.toFixed(2) : 'n/a';
     var c = cv.p25_75 != null ? Math.round(cv.p25_75 * 100) + '%' : 'n/a';
     var grid = document.getElementById('board-grid');
     if (!grid) return;
+    var ig = D.integrity || {};
+    var ok = 0, tot = 0, sum = 0;
+    for (var k = 0; k < rows.length; k++) {
+      var r = rows[k];
+      var v = Math.max(1, Math.round((num(r.tvl_usd) || 0) * (num(r.size_multiple) || 0) * (num(r.factor_used) || 0) * 0.6 * (r.haircut_applied ? 0.1 : 1)));
+      tot++;
+      if (v === num(r.implied_base)) ok++;
+      sum += num(r.implied_base) || 0;
+    }
     grid.insertAdjacentHTML('beforebegin',
       '<div class="panel" style="padding:10px 16px;font-size:13.5px">' +
       '<b>Model:</b> implied = TVL &times; size curve &times; category factor<sup>0.5</sup> &times; 0.6 — ' +
-      'fitted on ' + (loo.n != null ? loo.n : 128) + ' live-token comps, LOO &times;' + x + ' &middot; walk-forward ' + w + ' &middot; P25–P75 holds ' + c + ' &middot; LOO/WF are the shipped model</div>');
+      'fitted on ' + (loo.n != null ? loo.n : 128) + ' live-token comps, LOO &times;' + x + ' &middot; walk-forward ' + w + ' &middot; P25–P75 holds ' + c + '</div>' +
+      '<div class="panel" style="padding:10px 16px;font-size:13.5px">' +
+      '<b>Integrity:</b> board.json sha256 <span class="mono">' + esc(ig.boardChecksum || 'n/a') + '</span> &middot; ' + ok + '/' + tot +
+      ' rows recomputed here from their own terms &middot; totals equal ' + fmtUsd(sum) + '</div>');
   }
 
-
   var state = { q: '', cat: 'all', chain: 'all', band: 'all', conf: 'all', wl: false, sort: 'rank', dir: 1, dep: 10000 };
-  // Farm economics at the chosen deposit: the slice scales with the
-  // ticket, fees and hours are the plan's own (flat), T-bill is 4%
-  // annual on the ticket over the holding window. Same formula as the
-  // build-time net, computed at the plan's minimum ticket.
+  // Farm economics at the chosen deposit (v6, L20 — candidate J, audited
+  // against the top boards): slice = implied x 7% x (deployed / TVL),
+  // deployed = min(ticket, 0.02% of TVL); T-bill is 4% annual on the
+  // DEPLOYED ticket over the holding window; fees and hours are the plan's
+  // own (flat). Same formula as the build-time net, computed at the plan's
+  // minimum ticket.
   function windowYears(dur) {
     var m = /(\d+)\s*[–-]\s*(\d+)\s+days/.exec(dur || '');
     if (!m) return 45 / 365;
@@ -175,13 +192,15 @@
     var fees = num(n.fees) || 0, hours = num(n.hours) || 0;
     var yrs = windowYears((r.farm || {}).duration);
     var dep = state.dep;
-    var slice = (r.tvl_usd > 0) ? (num(r.implied_base) || 0) * 0.15 * (dep / r.tvl_usd) : 0;
-    var tbill = dep * 0.04 * yrs;
+    var deployed = (r.tvl_usd > 0) ? Math.min(dep, 0.0002 * r.tvl_usd) : 0;
+    var slice = (r.tvl_usd > 0) ? (num(r.implied_base) || 0) * 0.07 * (deployed / r.tvl_usd) : 0;
+    var tbill = deployed * 0.04 * yrs;
     var net = slice - fees - tbill;
-    var rate = (r.tvl_usd > 0) ? (num(r.implied_base) || 0) * 0.15 / r.tvl_usd - 0.04 * yrs : -1;
-    return { slice: slice, fees: fees, tbill: tbill, hours: hours, net: net,
+    var rate = (r.tvl_usd > 0) ? (num(r.implied_base) || 0) * 0.07 / r.tvl_usd - 0.04 * yrs : -1;
+    var cap = 0.0002 * (r.tvl_usd || 0);
+    return { slice: slice, deployed: deployed, fees: fees, tbill: tbill, hours: hours, net: net,
       netPerHour: hours > 0 ? net / hours : 0,
-      breakEven: rate > 0 ? fees / rate : null,
+      breakEven: rate > 0 && fees / rate <= cap ? fees / rate : null,
       verdict: net > 0 ? 'farm' : slice > fees ? 'marginal' : 'skip' };
   }
   var SORTS = {
@@ -221,13 +240,14 @@
     var list = filtered();
     var h = '';
     if (!list.length) {
-      h = '<tr><td colspan="11" class="mut">No protocols match these filters. Loosen the search or reset the filters.</td></tr>';
+      h = '<tr><td colspan="12" class="mut">No protocols match these filters. Loosen the search or reset the filters.</td></tr>';
     }
     for (var k = 0; k < list.length; k++) {
       var r = list[k];
       var na = netAt(r);
       var np = na.net > 0 ? 'pos' : 'neg';
       h += '<tr><td class="num">' + esc(r.rank) + '</td>' +
+        '<td class="num mut" style="font-size:12.5px">' + (num(r.rank_lo) != null && num(r.rank_hi) != null ? esc(r.rank_lo) + '–' + esc(r.rank_hi) : 'n/a') + '</td>' +
         '<td class="name">' + wlMark(r) + '<a href="' + rowLink(r) + '">' + esc(r.name) + '</a> ' + flagChip(r) +
         '<br><span class="mut" style="font-size:12px">' + esc(r.slug) + '</span></td>' +
         '<td>' + catChip(r.category) + '</td>' +
@@ -236,8 +256,7 @@
         '<td class="num">' + fmtUsd(r.tvl_usd) + '</td>' +
         '<td class="num ' + pctCls(r.change_7d) + '">' + fmtPct(r.change_7d) + '</td>' +
         '<td class="num">' + fmtAge(r.age_days) + '</td>' +
-        '<td><span class="num"><b>' + fmtUsd(r.implied_base) + '</b></span> <span class="mut num" style="font-size:12px">' + fmtUsd(r.implied_low) + ' – ' + fmtUsd(r.implied_bull) + '</span>' +
-        '<span class="bar"><i style="width:' + Math.max(2, Math.round(100 * (num(r.implied_base) || 0) / maxBase)) + '%"></i></span></td>' +
+        '<td><span class="num"><b>' + fmtUsd(r.implied_base) + '</b></span> <span class="mut num" style="font-size:12px">' + fmtUsd(r.implied_low) + ' – ' + fmtUsd(r.implied_bull) + '</span></td>' +
         '<td class="num ' + np + '">' + fmtSigned(na.net) + '</td>' +
         '<td class="num ' + np + '">' + fmtSignedH(na.netPerHour) + '</td>' +
         '<td>' + confBadge(r.confidence) + '</td></tr>';
@@ -245,7 +264,7 @@
     document.getElementById('tbody').innerHTML = h;
     var vc = { farm: 0, marginal: 0, skip: 0 };
     for (var vi = 0; vi < rows.length; vi++) vc[netAt(rows[vi]).verdict]++;
-    document.getElementById('count').innerHTML = 'Showing <b>' + list.length + '</b> of <b>' + rows.length + '</b> protocols &middot; at $' + state.dep.toLocaleString('en-US') + ': <b>' + vc.farm + '</b> farm / <b>' + vc.marginal + '</b> marginal / <b>' + vc.skip + '</b> skip';
+    document.getElementById('count').innerHTML = '<b>' + list.length + '</b> of <b>' + rows.length + '</b> &middot; at $' + state.dep.toLocaleString('en-US') + ': <b>' + vc.farm + '</b> farm / <b>' + vc.marginal + '</b> marginal / <b>' + vc.skip + '</b> skip';
     var ths = document.querySelectorAll('#boardtbl th[data-sort]');
     for (var j = 0; j < ths.length; j++) {
       ths[j].classList.toggle('sorted', ths[j].getAttribute('data-sort') === state.sort);
@@ -312,20 +331,46 @@
     var net = netAt(r);
     var steps = r.farm_steps || [];
     var risks = r.risks || [];
-    var comps = (D.live || []).filter(function (c) { return c.category === r.category; })
-      .sort(function (a, b) { return (num(b.mcap_usd) || 0) - (num(a.mcap_usd) || 0); }).slice(0, 5);
+    // v6, L16: nearest priced peers from ALL 128 live comps (not just the
+    // 24 largest): same category, else the row's family pool, else all
+    // comps — nearest by TVL, top 5. The old 24-row list left rows like
+    // USDD with "no comparable" although its category has live comps.
+    var allComps = (D.model && D.model.allComps) || [];
+    var famCats = [];
+    if (r.family && D.model && D.model.familyMultiples && D.model.familyMultiples[r.family]) famCats = D.model.familyMultiples[r.family].categories || [];
+    var peers = allComps.filter(function (c) { return c.category === r.category; });
+    var peerScope = 'same category';
+    if (peers.length < 2 && famCats.length) { peers = allComps.filter(function (c) { return famCats.indexOf(c.category) >= 0; }); peerScope = 'same family (' + r.family + ')'; }
+    if (peers.length < 2) { peers = allComps.slice(); peerScope = 'all live comps'; }
+    peers = peers.sort(function (a, b) { return Math.abs(Math.log(a.tvl / r.tvl_usd)) - Math.abs(Math.log(b.tvl / r.tvl_usd)); }).slice(0, 5);
+    var peersHtml = peers.length
+      ? '<p class="mut" style="font-size:12.5px;margin:0 0 6px">Nearest priced peers — ' + esc(peerScope) + ', closest by TVL:</p><div class="tbl-wrap"><table class="tbl mini"><thead><tr><th>Live comparable</th><th class="r">TVL</th><th class="r">Mcap</th><th class="r">mcap/TVL</th></tr></thead><tbody>' +
+        peers.map(function (c) {
+          return '<tr><td>' + esc(c.name) + '</td><td class="r num">' + fmtUsd(c.tvl) + '</td><td class="r num">' + fmtUsd(c.mcap) + '</td><td class="r num">' + fmtMult(c.mcap / c.tvl) + '</td></tr>';
+        }).join('') + '</tbody></table></div>'
+      : '<p class="mut">No live-token comparable in this category was in the snapshot.</p>';
+    // v6, L16: term-by-term dollar build from the row's own stored terms.
+    var sizeUsd = (num(r.tvl_usd) || 0) * (num(r.size_multiple) || 0);
+    var facUsd = sizeUsd * (num(r.factor_used) || 0);
+    var discUsd = facUsd * 0.6;
+    var finalUsd = discUsd * (r.haircut_applied ? 0.1 : 1);
+    var facHow = r.factor_source === 'curator' ? 'curator 0.5× — nested TVL, undamped'
+      : r.factor_source === 'family' ? 'family ' + (r.family || '') + ' ' + fmtMult(r.factor_raw) + ' → ' + fmtMult(r.factor_used)
+      : r.factor_source === 'global' ? 'global fallback 1.0× — no comps here'
+      : 'category ' + fmtMult(r.factor_raw) + ' → ' + fmtMult(r.factor_used);
+    var buildHtml = '<div class="tbl-wrap"><table class="tbl mini"><thead><tr><th>Term</th><th>How</th><th class="r">Value</th></tr></thead><tbody>' +
+      '<tr><td>Size curve</td><td>' + fmtUsd(r.tvl_usd) + ' TVL × ' + fmtMult(r.size_multiple) + '</td><td class="r num"><b>' + fmtUsd(sizeUsd) + '</b></td></tr>' +
+      '<tr><td>Category factor</td><td>' + esc(facHow) + '</td><td class="r num"><b>' + fmtUsd(facUsd) + '</b></td></tr>' +
+      '<tr><td>Stage discount</td><td>× 0.6 — pre-token execution risk</td><td class="r num"><b>' + fmtUsd(discUsd) + '</b></td></tr>' +
+      (r.haircut_applied ? '<tr><td>Concern haircut</td><td>× 0.10 — baked verification concern, see Risks</td><td class="r num"><b>' + fmtUsd(finalUsd) + '</b></td></tr>' : '') +
+      '</tbody></table></div>' +
+      '<p class="mut" style="font-size:12.5px;margin:8px 0 0">Product = <b style="color:var(--ink)">' + fmtUsd(finalUsd) + '</b> (implied FDV, base). Page recompute: ' + fmtUsd(impliedValueFromComps(r.tvl_usd, r.category, r.haircut_applied)) + '.</p>';
     var stepsHtml = steps.length
       ? '<ol class="farm">' + steps.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('') + '</ol>'
       : '<p class="mut">No farm steps recorded for this protocol.</p>';
     var risksHtml = risks.length
       ? '<ul class="risks">' + risks.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('') + '</ul>'
       : '<p class="mut">No specific risks recorded — the generic risks still apply: a token may never launch, and points may dilute.</p>';
-    var compsHtml = comps.length
-      ? '<div class="tbl-wrap"><table class="tbl mini"><thead><tr><th>Live comparable</th><th class="r">TVL</th><th class="r">Mcap</th><th class="r">mcap/TVL</th></tr></thead><tbody>' +
-        comps.map(function (c) {
-          return '<tr><td>' + esc(c.name) + '</td><td class="r num">' + fmtUsd(c.tvl_usd) + '</td><td class="r num">' + fmtUsd(c.mcap_usd) + '</td><td class="r num">' + fmtMult(c.multiple) + '</td></tr>';
-        }).join('') + '</tbody></table></div>'
-      : '<p class="mut">No live-token comparable in this category was in the snapshot.</p>';
     var dep = state.dep;
     var airLow = (num(r.implied_base) || 0) * 0.05;
     var airHigh = (num(r.implied_base) || 0) * 0.25;
@@ -348,29 +393,25 @@
       '<div class="d-stat"><span>Multiple used</span><b>' + fmtMult(r.multiple_used) + '</b><small>mcap/TVL, category-calibrated</small></div>' +
       '<div class="d-stat"><span>Implied FDV (base)</span><b>' + fmtUsd(r.implied_base) + '</b><small>low ' + fmtUsd(r.implied_low) + ' &middot; bull ' + fmtUsd(r.implied_bull) + '</small></div>' +
       '</div>' +
-      '<div class="range"><div><span>Low</span><b>' + fmtUsd(r.implied_low) + '</b></div>' +
-      '<div class="mid"><span>Base</span><b>' + fmtUsd(r.implied_base) + '</b></div>' +
-      '<div><span>Bull</span><b>' + fmtUsd(r.implied_bull) + '</b></div></div>' +
       '<div class="d-cols"><div class="d-sec"><h3>Farm plan</h3>' + stepsHtml +
       '<dl class="kv"><dt>Deposit</dt><dd class="num">' + fmtUsd(dep) + ' <span class="mut" style="font-size:12px">plan minimum ' + (farm.capital_usd != null ? fmtUsd(farm.capital_usd) : 'n/a') + ' — change it in the board filters</span></dd>' +
       '<dt>Duration</dt><dd>' + esc(farm.duration || 'n/a') + '</dd>' +
       '<dt>Points program</dt><dd>' + esc(pts) + '</dd>' +
       '<dt>Implied airdrop slice</dt><dd class="num">' + esc(airdrop) + '</dd>' +
       '<dt>Expected multiple</dt><dd class="num">' + evMult + ' <span class="mut" style="font-size:12px">whole pie &divide; ticket, not a per-user return</span></dd>' +
-      '<dt>Net if it launches</dt><dd class="num ' + (net.net > 0 ? 'pos' : 'neg') + '">' + fmtSigned(net.net) + ' <span class="mut" style="font-size:12px">slice ' + fmtUsd(net.slice) + ' − fees ' + fmtUsd(net.fees) + ' − T-bill ' + fmtUsd(net.tbill) + ' &middot; ' + fmtSignedH(net.netPerHour) + '</span></dd>' +
+      '<dt>Net if it launches</dt><dd class="num ' + (net.net > 0 ? 'pos' : 'neg') + '">' + fmtSigned(net.net) + ' <span class="mut" style="font-size:12px">slice ' + fmtUsd(net.slice) + ' − fees ' + fmtUsd(net.fees) + ' − T-bill ' + fmtUsd(net.tbill) + ' &middot; deployed ' + fmtUsd(net.deployed) + ' of ' + fmtUsd(dep) + ' &middot; ' + fmtSignedH(net.netPerHour) + '</span></dd>' +
       '<dt>Break-even ticket</dt><dd class="num">' + (net.breakEven != null ? fmtUsd(net.breakEven) : 'never') + '</dd></dl>' +
-      '<p class="mut" style="font-size:12.5px">The airdrop slice is the implied FDV times the share a community allocation usually takes (5–25%). Points outstanding are unknown, so no per-user value is claimed.</p></div>' +
-      '<div class="d-sec"><h3>Why this multiple</h3>' + compsHtml +
-      (r.factor_used != null ? '<dl class="kv" style="margin:12px 0 0"><dt>Category factor (damped)</dt><dd class="num">' + fmtMult(r.factor_used) + '</dd>' +
-      '<dt>Recomputed from comps</dt><dd class="num">' + fmtUsd(impliedValueFromComps(r.tvl_usd, r.category)) + '</dd></dl>' : '') +
+      '<p class="mut" style="font-size:12.5px">The airdrop slice is the implied FDV times the share a community allocation usually takes (5–25%). Plan steps are written for the plan-minimum ticket; the net above is at the selected deposit, and only the deployed part (at most 0.02% of TVL) earns the slice — the net uses a 7% share, see Method §6.</p></div>' +
+      '<div class="d-sec"><h3>Why this multiple</h3>' + buildHtml +
+      '<h3 style="margin-top:16px">Nearest priced peers</h3>' + peersHtml +
       '<h3 style="margin-top:16px">Risks</h3>' + risksHtml + '</div></div></div>';
   }
 
   
   function calChart() {
-    var m = D.model || {}, fp = m.fitPoints, ll = m.loglog, a, b;
+    var m = D.model || {}, fp = m.fitPoints, ll = m.loglog, a, b, c;
     var noPts = '<p class="mut">No calibration points in data.</p>';
-    if (!fp || !fp.length || !ll || (a = num(ll.a)) === null || (b = num(ll.b)) === null) return noPts;
+    if (!fp || !fp.length || !ll || (a = num(ll.a)) === null || (b = num(ll.b)) === null || (c = num(ll.c)) === null) return noPts;
     var L = 58, T = 12, w = 640 - L - 12, h = 360 - T - 34, Hb = T + h;
     var mnx = 1 / 0, mxx = 0, mny = 1 / 0, mxy = 0, i, p, x, y;
     for (i = 0; i < fp.length; i++) {
@@ -384,12 +425,19 @@
     var s = '<svg viewBox="0 0 640 360" class="chart">', t, py, p10;
     for (t = x0; t <= x1; t++) { p10 = Math.pow(10, t); s += '<text x="' + X(p10) + '" y="' + (Hb + 16) + '" class="ax">' + fmtUsd(p10) + '</text>'; }
     for (t = y0; t <= y1; t++) { p10 = Math.pow(10, t); py = Y(p10); s += '<line x1="' + L + '" y1="' + py + '" x2="' + (L + w) + '" y2="' + py + '" class="grid"/><text x="' + (L - 6) + '" y="' + (py + 4) + '" class="ay">' + fmtUsd(p10) + '</text>'; }
-    s += '<line x1="' + X(mnx) + '" y1="' + Y(Math.exp(a + b * Math.log(mnx))) + '" x2="' + X(mxx) + '" y2="' + Y(Math.exp(a + b * Math.log(mxx))) + '" class="fit"/>';
+    // Quadratic fit: a curve in log-log space, drawn as a 40-segment path.
+    var pts = '', si, lx, tv, mv;
+    for (si = 0; si <= 40; si++) {
+      lx = Math.log(mnx) + (Math.log(mxx) - Math.log(mnx)) * si / 40;
+      tv = Math.exp(lx); mv = Math.exp(a + b * lx + c * lx * lx);
+      pts += (si === 0 ? 'M' : 'L') + X(tv).toFixed(1) + ' ' + Y(mv).toFixed(1);
+    }
+    s += '<path d="' + pts + '" class="fit"/>';
     for (i = 0; i < fp.length; i++) {
       p = fp[i]; x = num(p[0]); y = num(p[1]);
       if (x > 0 && y > 0) s += '<circle cx="' + X(x) + '" cy="' + Y(y) + '" r="3" fill="' + catColor(p[2] || 'Other') + '"/>';
     }
-    return s + '</svg><p class="mut" style="font-size:13px;margin:10px 0 0">Dots: the ' + fp.length + ' live comps, log–log, by category. Line: log(mcap) = ' + a.toFixed(4) + ' + ' + b.toFixed(4) + ' &middot; log(TVL).</p>';
+    return s + '</svg><p class="mut" style="font-size:13px;margin:10px 0 0">Dots: the ' + fp.length + ' live comps, log–log, by category. Curve: log(mcap) = ' + a.toFixed(4) + ' + ' + b.toFixed(4) + ' &middot; log(TVL) + ' + c.toFixed(4) + ' &middot; log(TVL)&sup2;.</p>';
   }
 
   function renderModel() {
@@ -423,18 +471,16 @@
       '<div class="m-grid">' +
       '<div class="panel" style="padding:16px 18px"><div class="panel-h" style="padding:0 0 8px"><h2>How the implied value is built</h2></div>' +
       '<div class="formula">' + esc(m.formula || 'implied FDV = TVL x category multiple x stage discount') + '</div>' +
-      '<p class="mut" style="font-size:13.5px;margin:12px 0 0">The multiple is <b style="color:var(--ink)">not a flat guess</b>: it is fitted from the ' +
-      'snapshot&rsquo;s own live-token protocols — a log-log size curve (smaller protocols command higher ' +
-      'multiples) times a category multiplier. One model drives this page and board.json, so the numbers agree.</p>' +
       '<dl class="kv" style="margin-top:14px">' +
       '<dt>Model</dt><dd class="mono">' + esc(m.name || 'n/a') + '</dd>' +
-      '<dt>Log-log fit</dt><dd class="mono">log(mcap) = ' + (m.loglog ? m.loglog.a + ' + ' + m.loglog.b + ' &middot; log(TVL)' : 'n/a') + '</dd>' +
+      '<dt>Log-log fit</dt><dd class="mono">' + (m.loglog && m.loglog.a != null && m.loglog.b != null ? 'log(mcap) = ' + m.loglog.a.toFixed(4) + ' + ' + m.loglog.b.toFixed(4) + ' &middot; log(TVL)' + (m.loglog.c != null ? ' + ' + m.loglog.c.toFixed(4) + ' &middot; log(TVL)&sup2; (quadratic, radar-6)' : '') : 'n/a') + '</dd>' +
       '<dt>Stage discount</dt><dd class="mono">' + (m.stageDiscount != null ? m.stageDiscount : 'n/a') + ' (pre-token execution risk)</dd>' +
       '<dt>Backtest (leave-one-out)</dt><dd class="mono">' + (loo.n != null ? loo.n + ' live-token comps &middot; LOO &times;' + (loo.medianAbsLogErr != null ? Math.exp(loo.medianAbsLogErr).toFixed(2) : 'n/a') + ' (median |log error| ' + (loo.medianAbsLogErr != null ? loo.medianAbsLogErr.toFixed(2) : 'n/a') + ') &middot; within 2&times; ' + (loo.within2 != null ? (loo.within2 * 100).toFixed(1) + '%' : 'n/a') + ' &middot; within 3&times; ' + (loo.within3 != null ? (loo.within3 * 100).toFixed(1) + '%' : 'n/a') : 'n/a') + '<br><span style="font-size:12px">MAPE ' + (loo.mape != null ? (loo.mape * 100).toFixed(1) + '%' : 'n/a') + ' (near-dead tokens dominate); robust view (mcap &ge; $1M): MAPE ' + (lr.mape != null ? (lr.mape * 100).toFixed(1) + '%' : 'n/a') + ', median |log error| ' + (lr.medianAbsLogErr != null ? lr.medianAbsLogErr.toFixed(2) : 'n/a') + '.</span>' + (wfLine ? '<br>' + wfLine : '') + (cvLine ? '<br>' + cvLine : '') + '</dd>' +
-      '<dt>Comparables used</dt><dd class="mono">' + ((m.comps || []).length) + ' live-token protocols</dd></dl>' +
+      '<dt>Bootstrap (refit uncertainty)</dt><dd class="mono">' + (m.bootstrap ? m.bootstrap.n + ' resample refits: size multiple at $100M TVL log-s.e. ' + m.bootstrap.curveSe100M.toFixed(2) + ' (&times;' + Math.exp(m.bootstrap.curveSe100M).toFixed(2) + '); coefficient s.e. a &plusmn;' + m.bootstrap.aSe.toFixed(1) + ', b &plusmn;' + m.bootstrap.bSe.toFixed(2) + ', c &plusmn;' + m.bootstrap.cSe.toFixed(3) + ' — large because the coefficients are correlated, read the curve, not the coefficients. Rank ranges (P10–P90) are in the Range column on the board.' : 'n/a') + '</dd>' +
+      '<dt>Live comps</dt><dd class="mono">' + ((m.comps || []).length) + ' protocols</dd></dl>' +
       '<h3 style="margin:16px 0 8px;font-size:14px;color:var(--acc)">Ablation ladder — each term must earn its place</h3>' +
       (abRows ? '<dl class="kv" style="margin-top:10px">' + abRows + '</dl>' : '') +
-      '<p class="mut" style="font-size:13px">The shipped model is rung 2 — growth and maturity were pruned, and launch odds were fitted and rejected; the formula above states both. The LOO and walk-forward numbers describe the model on the board.</p>' +
+      '<p class="mut" style="font-size:13px">The shipped model is rung 2 — growth and maturity were pruned, and launch odds were fitted and rejected; the formula above states both. The negative control (rung 5, shuffled growth) is worse on both holdouts too, so growth is noise, not signal.</p>' +
       '<h3 style="margin:16px 0 8px;font-size:14px;color:var(--acc)">Category multiples (mcap / TVL, damped &gamma;=0.5)</h3>' +
       (multRows ? '<div class="tbl-wrap"><table class="tbl mini"><thead><tr><th>Category</th><th class="r">Multiple</th></tr></thead><tbody>' + multRows + '</tbody></table></div>' : '<p class="mut">No category multiples in data.</p>') +
       '</div>' +
@@ -447,37 +493,16 @@
       '<dt>Board rows</dt><dd class="num">' + esc(aud.boardRows != null ? aud.boardRows : rows.length) + '</dd></dl>' +
       '<h3 style="margin:16px 0 8px;font-size:14px;color:var(--acc)">Excluded — and why</h3>' +
       (excl ? '<ul class="excl">' + excl + '</ul>' : '<p class="mut">No exclusions recorded.</p>') +
-      '<p class="mut" style="font-size:13px;margin-top:14px">Exclusion is the credibility test: a CEX balance, a wrapped asset or a versioned ' +
-      'sub-entry of a protocol whose token already trades is not a token launch, however large its TVL. ' +
-      'Every excluded protocol is counted above with its reason.</p>' + cfHtml + '</div>' +
+      cfHtml + '</div>' +
       '</div>' +
       '<div class="panel" style="padding:16px 18px;margin-top:16px"><h2 style="margin:0 0 8px;font-size:15px">Calibration chart</h2>' + calChart() + '</div>';
   }
 
-  function renderComps() {
-    var live = (D.live || []).slice().sort(function (a, b) { return (num(b.mcap_usd) || 0) - (num(a.mcap_usd) || 0); });
-    var h = '<div class="panel" style="padding:16px 18px"><div class="panel-h" style="padding:0 0 8px"><h2>Live-token comparables</h2><span class="hint">' + live.length + ' protocols with a trading token, from the same snapshot</span></div>' +
-      '<p class="mut" style="font-size:13.5px;margin:0 0 12px">These are the protocols the multiples were fitted from. ' +
-      'A pre-token protocol is valued by what the market already pays, per dollar of TVL, for a live token in the same category and size band — not by a flat rule.</p>';
-    if (!live.length) {
-      h += '<p class="mut">No live-token comparables in data.</p></div>';
-    } else {
-      h += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Protocol</th><th>Category</th><th class="r">TVL</th><th class="r">Mcap</th><th class="r">mcap/TVL</th></tr></thead><tbody>' +
-        live.map(function (c) {
-          return '<tr><td class="name">' + esc(c.name) + '</td><td>' + catChip(c.category) + '</td>' +
-            '<td class="r num">' + fmtUsd(c.tvl_usd) + '</td><td class="r num">' + fmtUsd(c.mcap_usd) + '</td>' +
-            '<td class="r num"><b>' + fmtMult(c.multiple) + '</b></td></tr>';
-        }).join('') + '</tbody></table></div></div>';
-    }
-    document.getElementById('comps').innerHTML = h;
-  }
-
-  var views = ['board', 'detail', 'model', 'comps'];
+  var views = ['board', 'detail', 'model'];
   function route() {
     var hash = (window.location.hash || '').replace(/^#\/?/, '');
     var view = 'board', slug = null;
     if (hash === 'model') view = 'model';
-    else if (hash === 'comps') view = 'comps';
     else if (hash.indexOf('protocol/') === 0) { view = 'detail'; slug = decodeURIComponent(hash.slice(9)); }
     views.forEach(function (v) {
       var el = document.getElementById('view-' + v);
@@ -489,14 +514,13 @@
     }
     if (view === 'detail') renderDetail(slug);
     if (view === 'model') renderModel();
-    if (view === 'comps') renderComps();
     window.scrollTo(0, 0);
   }
   window.addEventListener('hashchange', route);
 
   renderStats();
   renderTop10();
-  renderModelStrip();
+  renderStrips();
   document.getElementById('board-scatter').innerHTML = calChart();
   renderBoard();
   route();
